@@ -54,6 +54,54 @@
 //// jwc 26-0109-1200 NEW: Robust serial communications on GPIO 17 (TX) / GPIO 18 (RX)
 //// Replaces simple Serial1 code in loop() with proper line buffering and timing
 #include "Serial_Comms.h"
+
+//// jwc 26-0124-1030 PHASE 1: WiFi & WebSocket includes + configuration
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include <ArduinoJson.h>
+
+//// jwc 26-0124-1030 WiFi credentials (update these for your network)
+const char* ssid = "Chan-Comcast";
+const char* password = "Jesus333!";
+
+//// jwc 26-0124-1240 WebSocket authentication token (must match server)
+const char* AUTH_TOKEN = "Jesus333!!!";
+
+//// jwc 26-0124-1030 WebSocket server configuration
+//// Format: ws://hostname:port/path or wss://hostname:port/path for SSL
+//// jwc 26-0124-1105 UPDATED: Using same server config as Lilygo T-Camera Plus S3
+//// * C:\12i-Db\Dropbox\09k-E32-SM\25-0517-1900-E32--OPENED\13i-T-CameraPlus-S3-NOW-Ubuntu22_BmaxB1Pro--25-0505-0730-NOW\25-1123-1700-E32_TCameraPlusS3-AprilTag-SerialToMicrobit-HttpsCorsToGDevelop\examples\Camera_Screen_AprilTag__Serial_With_Microbit--Esp32_Client_Websocket-NOW\01-Esp32-Client
+//// jwc 26-0124-1215 o const char* ws_host = "76.102.42.17";    // Ubuntu server IP (public IP via port-forward)
+const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win
+const uint16_t ws_port = 5000;           // WebSocket server port
+const char* ws_path = "/websocket";      // WebSocket endpoint path
+
+WebSocketsClient webSocket;
+
+//// jwc 26-0124-1030 PHASE 2: AprilTag data queue & timing
+//// Queue to store detected AprilTag data for transmission
+#define MAX_QUEUE_SIZE 10
+struct AprilTagData {
+  int id;
+  float decision_margin;
+  float yaw;
+  float pitch;
+  float roll;
+  float x;
+  float y;
+  float z;
+  unsigned long timestamp;
+};
+AprilTagData tagQueue[MAX_QUEUE_SIZE];
+int queueHead = 0;
+int queueTail = 0;
+int queueCount = 0;
+SemaphoreHandle_t queueMutex = NULL;
+
+//// jwc 26-0124-1030 Timing control for WebSocket transmission
+unsigned long lastTransmitTime = 0;
+const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
+
 /*To use the built-in examples and demos of LVGL uncomment the includes below respectively.
  *You also need to copy `lvgl/examples` to `lvgl/src/examples`. Similarly for the demos `lvgl/demos` to `lvgl/src/demos`.
  Note that the `lv_examples` library is for LVGL v7 and you shouldn't install it for this version (since LVGL v8)
@@ -178,16 +226,27 @@ Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled
 // Tag size (in meter). See original AprilTag readme for how to measure
 // You have to put your value here. This value is of NO standard and
 // is just my own tag size.
-#define TAG_SIZE 0.05
+//// jwc 26-0124-1250 Renamed to avoid conflict with ESP32 ROM cache.h TAG_SIZE (value 4)
+#define APRILTAG_SIZE 0.05
 
+//// jwc 26-0124-1030 PHASE 3: Updated camera calibration for Waveshare ESP32-S3 (HVGA 480x320)
+//// Original values were for different camera - these are estimates for OV2640 at HVGA
+//// TODO: Calibrate your specific camera using 3DF Zephyr or similar tool for accurate pose
 // Camera calibration data
 // This information is obtained by calibrating your camera using software like 3DF Zephyr
 // You have to calibrate and put your own values here, this value is just for my camera
 // and likely not work on your camera.
-#define FX 924.713610878 // fx (in pixel)
-#define FY 924.713610878 // fy (in pixel)
-#define CX 403.801748132 // cx (in pixel)
-#define CY 305.082642826 // cy (in pixel)
+//// jwc 26-0124-1030 ARCHIVED: Original calibration (different camera/resolution)
+//// #define FX 924.713610878 // fx (in pixel)
+//// #define FY 924.713610878 // fy (in pixel)
+//// #define CX 403.801748132 // cx (in pixel)
+//// #define CY 305.082642826 // cy (in pixel)
+//// jwc 26-0124-1030 NEW: Estimated calibration for OV2640 at HVGA (480x320)
+//// Focal length estimates based on typical OV2640 specs and HVGA resolution
+#define FX 480.0 // fx (in pixel) - estimated for HVGA width
+#define FY 480.0 // fy (in pixel) - estimated (square pixels)
+#define CX 240.0 // cx (in pixel) - center of 480px width
+#define CY 160.0 // cy (in pixel) - center of 320px height
 
 
 /*
@@ -357,6 +416,144 @@ void draw_comm_button() {
   gfx->setCursor(60, BUTTON_Y + 12);
   gfx->print("COMM: ");
   gfx->print(comm_display_enabled ? "ON" : "OFF");
+}
+
+//// jwc 26-0124-1030 PHASE 4: WiFi initialization function
+void initWiFi() {
+  Serial.println("*** Initializing WiFi...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n*** WiFi connected!");
+    Serial.print("*** IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n*** ERROR: WiFi connection failed!");
+  }
+}
+
+//// jwc 26-0124-1030 PHASE 5: WebSocket event handler
+//// jwc 26-0124-1240 UPDATED: Send identify message on connect
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.println("*** WebSocket disconnected!");
+      break;
+    case WStype_CONNECTED:
+      {
+        Serial.printf("*** WebSocket connected to: %s\n", payload);
+        
+        //// jwc 26-0124-1240 Send identify message with authentication
+        StaticJsonDocument<256> identifyDoc;
+        identifyDoc["event"] = "identify";
+        JsonObject identifyData = identifyDoc.createNestedObject("data");
+        identifyData["type"] = "esp32";
+        identifyData["device"] = "Waveshare-ESP32-S3-Touch-LCD-2";
+        identifyData["auth_token"] = AUTH_TOKEN;
+        
+        String identifyJson;
+        serializeJson(identifyDoc, identifyJson);
+        webSocket.sendTXT(identifyJson);
+        
+        Serial.printf("*** Sent identify message: %s\n", identifyJson.c_str());
+      }
+      break;
+    case WStype_TEXT:
+      Serial.printf("*** WebSocket RX: %s\n", payload);
+      break;
+    case WStype_ERROR:
+      Serial.println("*** WebSocket ERROR!");
+      break;
+    default:
+      break;
+  }
+}
+
+//// jwc 26-0124-1030 PHASE 6: AprilTag queue & transmission functions
+//// Enqueue detected AprilTag data (called from detection loop)
+void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, float roll, float x, float y, float z) {
+  if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (queueCount < MAX_QUEUE_SIZE) {
+      tagQueue[queueTail].id = id;
+      tagQueue[queueTail].decision_margin = decision_margin;
+      tagQueue[queueTail].yaw = yaw;
+      tagQueue[queueTail].pitch = pitch;
+      tagQueue[queueTail].roll = roll;
+      tagQueue[queueTail].x = x;
+      tagQueue[queueTail].y = y;
+      tagQueue[queueTail].z = z;
+      tagQueue[queueTail].timestamp = millis();
+      
+      queueTail = (queueTail + 1) % MAX_QUEUE_SIZE;
+      queueCount++;
+      
+      Serial.printf("*** Enqueued tag ID %d (queue: %d/%d)\n", id, queueCount, MAX_QUEUE_SIZE);
+    } else {
+      Serial.println("*** WARNING: Queue full, dropping tag data!");
+    }
+    xSemaphoreGive(queueMutex);
+  }
+}
+
+//// Transmit queued AprilTag data via WebSocket (called periodically)
+void transmitAprilTags() {
+  unsigned long currentTime = millis();
+  
+  // Check if it's time to transmit
+  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
+    return;
+  }
+  
+  // Check if WebSocket is connected
+  if (!webSocket.isConnected()) {
+    Serial.println("*** WebSocket not connected, skipping transmission");
+    return;
+  }
+  
+  // Check if queue has data
+  if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (queueCount > 0) {
+      // Create JSON document (allocate enough for multiple tags)
+      StaticJsonDocument<1024> doc;
+      JsonArray tags = doc.createNestedArray("tags");
+      
+      // Dequeue all available tags
+      int transmitted = 0;
+      while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
+        JsonObject tag = tags.createNestedObject();
+        tag["id"] = tagQueue[queueHead].id;
+        tag["decision_margin"] = tagQueue[queueHead].decision_margin;
+        tag["yaw"] = tagQueue[queueHead].yaw;
+        tag["pitch"] = tagQueue[queueHead].pitch;
+        tag["roll"] = tagQueue[queueHead].roll;
+        tag["x"] = tagQueue[queueHead].x;
+        tag["y"] = tagQueue[queueHead].y;
+        tag["z"] = tagQueue[queueHead].z;
+        tag["timestamp"] = tagQueue[queueHead].timestamp;
+        
+        queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
+        queueCount--;
+        transmitted++;
+      }
+      
+      // Serialize and send
+      String jsonString;
+      serializeJson(doc, jsonString);
+      webSocket.sendTXT(jsonString);
+      
+      Serial.printf("*** Transmitted %d tags via WebSocket\n", transmitted);
+      lastTransmitTime = currentTime;
+    }
+    xSemaphoreGive(queueMutex);
+  }
 }
 
 
@@ -710,7 +907,7 @@ if(zarray_size(detections) > 0){
       // Creating detection info object to feed into pose estimator
       apriltag_detection_info_t info;
       info.det = det;
-      info.tagsize = TAG_SIZE;
+      info.tagsize = APRILTAG_SIZE;
       info.fx = FX;
       info.fy = FY;
       info.cx = CX;
@@ -764,6 +961,12 @@ if(zarray_size(detections) > 0){
       matd_destroy(R_transpose);
       matd_destroy(camera_position);
 
+      //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for WebSocket transmission
+      enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
+                      MATD_EL(camera_position, 0, 0), 
+                      MATD_EL(camera_position, 1, 0), 
+                      MATD_EL(camera_position, 2, 0));
+
       //// jwc o Serial.println("");
       printf("\n");
   }
@@ -788,6 +991,13 @@ if(zarray_size(detections) > 0){
 
 
     esp_camera_fb_return(camera_framebuffer_pic_ObjPtr);
+    
+    //// jwc 26-0124-1030 PHASE 7: Transmit queued AprilTags via WebSocket
+    transmitAprilTags();
+    
+    //// jwc 26-0124-1030 PHASE 7: Process WebSocket events
+    webSocket.loop();
+    
     vTaskDelay(pdMS_TO_TICKS(1));
     //// jwc Clear Buffer
     camera_framebuffer_pic_ObjPtr = NULL;
@@ -954,6 +1164,23 @@ void setup() {
   Serial.println("Start AprilTag detecting...");
 #endif
 
+
+  //// jwc 26-0124-1030 PHASE 7: Initialize WiFi and WebSocket
+  initWiFi();
+  
+  //// jwc 26-0124-1030 PHASE 7: Initialize queue mutex
+  queueMutex = xSemaphoreCreateMutex();
+  if (queueMutex == NULL) {
+    Serial.println("*** ERROR: Failed to create queue mutex!");
+  } else {
+    Serial.println("*** Queue mutex created successfully");
+  }
+  
+  //// jwc 26-0124-1030 PHASE 7: Initialize WebSocket client
+  webSocket.begin(ws_host, ws_port, ws_path);
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000);
+  Serial.println("*** WebSocket client initialized");
 
   Serial.println("Setup done");
 

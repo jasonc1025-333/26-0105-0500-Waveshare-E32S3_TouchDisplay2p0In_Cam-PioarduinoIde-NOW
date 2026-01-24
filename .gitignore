@@ -5,3 +5,13 @@
 .vscode/ipch
 99-ARCHIVE-GOOD/
 *SNAPSHOT*
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt

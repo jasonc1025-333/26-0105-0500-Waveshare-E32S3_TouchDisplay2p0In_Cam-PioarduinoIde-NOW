@@ -1,0 +1,21 @@
+# Pure WebSocket Server Requirements
+# Install with: pip install -r requirements.txt
+
+# ============================================================================
+# VERSION COMPATIBILITY NOTES (25-1202-0335)
+# ============================================================================
+# TRIED: simple-websocket 1.0.0
+#   - Had Werkzeug compatibility issues (requires 2.x, Flask 3.x needs 3.x)
+#   - Even with Flask 2.3.0 + Werkzeug 2.3.0, got 400 Bad Request errors
+#   - Unreliable and difficult to debug
+#
+# SOLUTION: Using flask-sock with Flask 3.0.0 (latest)
+#   - flask-sock is compatible with Flask 3.x - works perfectly!
+#   - More reliable, better Flask integration, actively maintained
+#   - No version conflicts - we can use latest Flask!
+# ============================================================================
+
+# Core dependencies - Latest stable versions with flask-sock
+Flask==3.0.0          # Latest stable Flask (no need to downgrade!)
+Flask-CORS==4.0.0     # CORS support for cross-origin requests
+flask-sock==0.6.0     # Reliable WebSocket implementation (works with Flask 3.x!)
