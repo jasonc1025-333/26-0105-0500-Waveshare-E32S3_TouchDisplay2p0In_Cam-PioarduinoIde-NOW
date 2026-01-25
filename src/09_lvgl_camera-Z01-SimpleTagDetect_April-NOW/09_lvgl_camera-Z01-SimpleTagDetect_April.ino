@@ -227,7 +227,7 @@ Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled
 // You have to put your value here. This value is of NO standard and
 // is just my own tag size.
 //// jwc 26-0124-1250 Renamed to avoid conflict with ESP32 ROM cache.h TAG_SIZE (value 4)
-#define APRILTAG_SIZE 0.05
+#define APRIL_TAG_SIZE 0.05
 
 //// jwc 26-0124-1030 PHASE 3: Updated camera calibration for Waveshare ESP32-S3 (HVGA 480x320)
 //// Original values were for different camera - these are estimates for OV2640 at HVGA
@@ -463,11 +463,14 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         serializeJson(identifyDoc, identifyJson);
         webSocket.sendTXT(identifyJson);
         
-        Serial.printf("*** Sent identify message: %s\n", identifyJson.c_str());
+        Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", identifyJson.c_str());
       }
       break;
     case WStype_TEXT:
-      Serial.printf("*** WebSocket RX: %s\n", payload);
+      {
+        //// jwc 26-0124-1340 NEW: Debug print with arrow convention
+        Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", payload);
+      }
       break;
     case WStype_ERROR:
       Serial.println("*** WebSocket ERROR!");
@@ -504,6 +507,7 @@ void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, floa
 }
 
 //// Transmit queued AprilTag data via WebSocket (called periodically)
+//// jwc 26-0124-1530 UPDATED: Send individual tag messages (not array) to match server format
 void transmitAprilTags() {
   unsigned long currentTime = millis();
   
@@ -521,35 +525,38 @@ void transmitAprilTags() {
   // Check if queue has data
   if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     if (queueCount > 0) {
-      // Create JSON document (allocate enough for multiple tags)
-      StaticJsonDocument<1024> doc;
-      JsonArray tags = doc.createNestedArray("tags");
-      
-      // Dequeue all available tags
+      // Send each tag as individual message (server expects flat format)
       int transmitted = 0;
       while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
-        JsonObject tag = tags.createNestedObject();
-        tag["id"] = tagQueue[queueHead].id;
-        tag["decision_margin"] = tagQueue[queueHead].decision_margin;
-        tag["yaw"] = tagQueue[queueHead].yaw;
-        tag["pitch"] = tagQueue[queueHead].pitch;
-        tag["roll"] = tagQueue[queueHead].roll;
-        tag["x"] = tagQueue[queueHead].x;
-        tag["y"] = tagQueue[queueHead].y;
-        tag["z"] = tagQueue[queueHead].z;
-        tag["timestamp"] = tagQueue[queueHead].timestamp;
+        // Create JSON document for single tag
+        StaticJsonDocument<512> doc;
+        doc["event"] = "apriltag_data";
+        doc["tag_id"] = tagQueue[queueHead].id;
+        doc["decision_margin"] = tagQueue[queueHead].decision_margin;
+        doc["yaw"] = tagQueue[queueHead].yaw;
+        doc["pitch"] = tagQueue[queueHead].pitch;
+        doc["roll"] = tagQueue[queueHead].roll;
+        doc["x_cm"] = tagQueue[queueHead].x;
+        doc["y_cm"] = tagQueue[queueHead].y;
+        doc["z_cm"] = tagQueue[queueHead].z;
+        doc["timestamp"] = tagQueue[queueHead].timestamp;
+        doc["camera_name"] = "Waveshare-ESP32-S3";
+        doc["smartcam_ip"] = WiFi.localIP().toString();
+        
+        // Serialize and send
+        String jsonString;
+        serializeJson(doc, jsonString);
+        webSocket.sendTXT(jsonString);
+        
+        //// jwc 26-0124-1340 NEW: Debug print with arrow convention
+        Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", jsonString.c_str());
         
         queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
         queueCount--;
         transmitted++;
       }
       
-      // Serialize and send
-      String jsonString;
-      serializeJson(doc, jsonString);
-      webSocket.sendTXT(jsonString);
-      
-      Serial.printf("*** Transmitted %d tags via WebSocket\n", transmitted);
+      Serial.printf("*** Esp32 -->> SvHub: Sent %d tags to server\n", transmitted);
       lastTransmitTime = currentTime;
     }
     xSemaphoreGive(queueMutex);
@@ -907,7 +914,7 @@ if(zarray_size(detections) > 0){
       // Creating detection info object to feed into pose estimator
       apriltag_detection_info_t info;
       info.det = det;
-      info.tagsize = APRILTAG_SIZE;
+      info.tagsize = APRIL_TAG_SIZE;
       info.fx = FX;
       info.fy = FY;
       info.cx = CX;
@@ -921,7 +928,7 @@ if(zarray_size(detections) > 0){
       //matd_print(pose.R, "%15f"); // Rotation matrix
       //matd_print(pose.t, "%15f"); // Translation matrix
 
-#if DEBUG >= 1    
+#if DEBUG >= 2
       // Print result (position of the tag in the camera's coordinate system)
       //matd_print(pose.R, "%15f"); // Rotation matrix
       //matd_print(pose.t, "%15f"); // Translation matrix
@@ -939,10 +946,6 @@ if(zarray_size(detections) > 0){
       double pitch = atan2(-MATD_EL(pose.R, 2, 0), sqrt(pow(MATD_EL(pose.R, 2, 1), 2) + pow(MATD_EL(pose.R, 2, 2), 2))) * RAD_TO_DEG;
       double roll = atan2(MATD_EL(pose.R, 2, 1), MATD_EL(pose.R, 2, 2)) * RAD_TO_DEG;
 
-      // Print the yaw, pitch, and roll of the camera
-      //// jwc y printf("y,p,r: %15f, %15f, %15f\n", yaw, pitch, roll);
-      printf(" *** y,p,r: %5.0f, %5.0f, %5.0f", yaw, pitch, roll);
-      
       // Compute the transpose of the rotation matrix
       matd_t *R_transpose = matd_transpose(pose.R);
 
@@ -953,9 +956,11 @@ if(zarray_size(detections) > 0){
 
       // Compute the position of the camera in the tag's coordinate system
       matd_t *camera_position = matd_multiply(R_transpose, pose.t);
-      //// jwc y printf("x,y,z: %15f, %15f, %15f\n", MATD_EL(camera_position, 0, 0), MATD_EL(camera_position, 1, 0), MATD_EL(camera_position, 2, 0));
-      //// jwc o printf("*** x,y,z: %5.0f, %5.0f, %5.0f\n", MATD_EL(camera_position, 0, 0), MATD_EL(camera_position, 1, 0), MATD_EL(camera_position, 2, 0));
-      printf(" *** x,y,z: %5.0f, %5.0f, %5.0f", MATD_EL(camera_position, 0, 0), MATD_EL(camera_position, 1, 0), MATD_EL(camera_position, 2, 0));
+      
+      //// jwc 26-0124-1335 UPDATED: Single-line AprilTag detection output (keep original printf for screen display)
+      printf("*** *** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
+      printf(" *** y,p,r: %5.0f, %5.0f, %5.0f", yaw, pitch, roll);
+      printf(" *** x,y,z: %5.0f, %5.0f, %5.0f\n", MATD_EL(camera_position, 0, 0), MATD_EL(camera_position, 1, 0), MATD_EL(camera_position, 2, 0));
 
       // Free the matrices
       matd_destroy(R_transpose);
@@ -966,9 +971,6 @@ if(zarray_size(detections) > 0){
                       MATD_EL(camera_position, 0, 0), 
                       MATD_EL(camera_position, 1, 0), 
                       MATD_EL(camera_position, 2, 0));
-
-      //// jwc o Serial.println("");
-      printf("\n");
   }
   //// jwc o Serial.println("");
   printf("\n");

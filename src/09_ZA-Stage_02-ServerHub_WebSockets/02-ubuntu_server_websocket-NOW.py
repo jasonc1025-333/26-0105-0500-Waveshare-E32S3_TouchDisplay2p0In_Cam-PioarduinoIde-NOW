@@ -479,8 +479,7 @@ def broadcast_to_gdevelop(message_dict):
     data_info = ""
     if event_name == 'apriltag_data':
         data_info = f" tag_id={message_dict.get('tag_id', 0)}, x={message_dict.get('x_cm', 0):.1f}, y={message_dict.get('y_cm', 0):.1f}, z={message_dict.get('z_cm', 0):.1f}"
-    json_preview = message_json[:200] + '...' if len(message_json) > 200 else message_json
-    print(f"🔵<<-- SEND to GDevelop ({len(websocket_clients['gdevelop'])} clients): Event={event_name},{data_info} JSON={json_preview}")
+    print(f"*** SvHub -->> GDeve: ({len(websocket_clients['gdevelop'])} clients) Event={event_name},{data_info} JSON={message_json}")
     
     with websocket_lock:
         disconnected = []
@@ -515,8 +514,8 @@ def handle_esp32_message(ws, message):
                     'error': error_msg,
                     'message': 'Authentication required - check your auth_token'
                 }
-                print(f"🟢-->> RECV ESP32: identify (AUTH FAILED: {error_msg})")
-                print(f"🔵<<-- SEND to ESP32: {json.dumps(auth_fail_msg)}")
+                print(f"*** SvHub <<-- Esp32: identify (AUTH FAILED: {error_msg})")
+                print(f"*** SvHub -->> Esp32: {json.dumps(auth_fail_msg)}")
                 ws.send(json.dumps(auth_fail_msg))
                 return  # Don't add to clients list
             
@@ -540,8 +539,8 @@ def handle_esp32_message(ws, message):
             esp32_name = data.get('data', {}).get('camera_name', 'ESP32-Unknown')
             
             identify_success_msg = {'event': 'identify_success', 'client_type': 'esp32'}
-            print(f"🟢-->> RECV ESP32: identify | 📹 ESP32 CLIENT IDENTIFIED ✅ Camera={esp32_name}, Auth=PASSED, ESP32_Clients={len(websocket_clients['esp32'])}")
-            print(f"🔵<<-- SEND to ESP32: {json.dumps(identify_success_msg)}")
+            print(f"*** SvHub <<-- Esp32: identify | 📹 ESP32 CLIENT IDENTIFIED ✅ Camera={esp32_name}, Auth=PASSED, ESP32_Clients={len(websocket_clients['esp32'])}")
+            print(f"*** SvHub -->> Esp32: {json.dumps(identify_success_msg)}")
             ws.send(json.dumps(identify_success_msg))
             
         elif event == 'apriltag_data':
@@ -588,22 +587,22 @@ def handle_esp32_message(ws, message):
             # Record AprilTag timing [jwc 25-1207-2110]
             timing_monitor.record_apriltag()
             
-            print(f"🟢-->> RECV ESP32: apriltag_data | 📡 ID={payload.get('tag_id')}, Pos=({payload.get('x_cm', 0):.1f},{payload.get('y_cm', 0):.1f},{payload.get('z_cm', 0):.1f})cm <<-- GDevelop({stats['gdevelop_clients']}) | JSON={json.dumps(broadcast_message)[:150]}...")
+            print(f"*** SvHub <<-- Esp32: apriltag_data | 📡 ID={payload.get('tag_id')}, Pos=({payload.get('x_cm', 0):.1f},{payload.get('y_cm', 0):.1f},{payload.get('z_cm', 0):.1f})cm | GDevelop_clients={stats['gdevelop_clients']}")
             
             # Acknowledge to ESP32
             ack_msg = {'event': 'apriltag_ack', 'status': 'received'}
-            print(f"🔵<<-- SEND to ESP32 (ACK): {json.dumps(ack_msg)}")
+            print(f"*** SvHub -->> Esp32: (ACK) {json.dumps(ack_msg)}")
             ws.send(json.dumps(ack_msg))
             
         elif event == 'video_frame':
             # Received video frame
             stats['video_frames'] += 1
-            print(f"🟢-->> RECV ESP32: video_frame | 📹 Frame #{stats['video_frames']}")
+            print(f"*** SvHub <<-- Esp32: video_frame | 📹 Frame #{stats['video_frames']}")
             
         elif event == 'ping':
-            print(f"🟢-->> RECV ESP32: ping")
+            print(f"*** SvHub <<-- Esp32: ping")
             pong_msg = {'event': 'pong', 'timestamp': time.time()}
-            print(f"🔵<<-- SEND to ESP32 (PONG): {json.dumps(pong_msg)}")
+            print(f"*** SvHub -->> Esp32: (PONG) {json.dumps(pong_msg)}")
             ws.send(json.dumps(pong_msg))
             
     except json.JSONDecodeError:
@@ -627,32 +626,32 @@ def handle_gdevelop_message(ws, message):
             gdevelop_name = data.get('data', {}).get('name', 'GDevelop-Client')
             
             identify_success_msg = {'event': 'identify_success', 'client_type': 'gdevelop'}
-            print(f"🟢-->> RECV GDevelop: identify | 🎮 GDEVELOP CLIENT IDENTIFIED ✅ Name={gdevelop_name}, GDevelop_Clients={stats['gdevelop_clients']}")
-            print(f"🔵<<-- SEND to GDevelop: {json.dumps(identify_success_msg)}")
+            print(f"*** SvHub <<-- GDeve: identify | 🎮 GDEVELOP CLIENT IDENTIFIED ✅ Name={gdevelop_name}, GDevelop_Clients={stats['gdevelop_clients']}")
+            print(f"*** SvHub -->> GDeve: {json.dumps(identify_success_msg)}")
             ws.send(json.dumps(identify_success_msg))
             
             # Send latest data if available (FLAT format)
             if latest_apriltag_data:
                 latest_data_msg = {'event': 'apriltag_data', **latest_apriltag_data}
-                print(f"🔵<<-- SEND to GDevelop (Latest Data): {json.dumps(latest_data_msg)[:200]}...")
+                print(f"*** SvHub -->> GDeve: (Latest Data) {json.dumps(latest_data_msg)}")
                 ws.send(json.dumps(latest_data_msg))
                 
         elif event == 'request_latest_data':
-            print(f"🟢-->> RECV GDevelop: request_latest_data")
+            print(f"*** SvHub <<-- GDeve: request_latest_data")
             # GDevelop requesting latest data (FLAT format)
             if latest_apriltag_data:
                 latest_data_msg = {'event': 'apriltag_data', **latest_apriltag_data}
-                print(f"🔵<<-- SEND to GDevelop (Requested Data): {json.dumps(latest_data_msg)[:200]}...")
+                print(f"*** SvHub -->> GDeve: (Requested Data) {json.dumps(latest_data_msg)}")
                 ws.send(json.dumps(latest_data_msg))
             else:
                 no_data_msg = {'event': 'no_data_available'}
-                print(f"🔵<<-- SEND to GDevelop: {json.dumps(no_data_msg)}")
+                print(f"*** SvHub -->> GDeve: {json.dumps(no_data_msg)}")
                 ws.send(json.dumps(no_data_msg))
                 
         elif event == 'ping':
-            print(f"🟢-->> RECV GDevelop: ping")
+            print(f"*** SvHub <<-- GDeve: ping")
             pong_msg = {'event': 'pong', 'timestamp': time.time()}
-            print(f"🔵<<-- SEND to GDevelop (PONG): {json.dumps(pong_msg)}")
+            print(f"*** SvHub -->> GDeve: (PONG) {json.dumps(pong_msg)}")
             ws.send(json.dumps(pong_msg))
             
     except json.JSONDecodeError:
@@ -688,7 +687,7 @@ def websocket(ws):
         'event': 'connection_success',
         'message': 'WebSocket connected - send identify event'
     }
-    print(f"🔵<<-- SEND Welcome to {client_ip}: {json.dumps(welcome_msg)}")
+    print(f"*** SvHub -->> Esp32: {json.dumps(welcome_msg)}")
     ws.send(json.dumps(welcome_msg))
     
     client_type = 'unknown'
@@ -762,7 +761,7 @@ def websocket(ws):
                         # Get performance stats for enhanced debug output
                         perf_stats = video_perf.get_stats()
                         
-                        print(f"🟢-->> RECV ESP32: video_frame (WebSocket Binary) | 📹 {len(jpeg_data)} bytes {width_log}x{height_log} (#{stats['video_frames']}) FPS={calculated_fps:.2f}")
+                        print(f"SvHub <<-- Esp32: video_frame (WebSocket Binary) | 📹 {len(jpeg_data)} bytes {width_log}x{height_log} (#{stats['video_frames']}) FPS={calculated_fps:.2f}")
                         print(f"      📊 PERF: Interval={perf_stats['avg_interval']:.3f}s (min={perf_stats['min_interval']:.3f}s max={perf_stats['max_interval']:.3f}s) Jitter={perf_stats['jitter']:.3f}s")
                         print(f"      📊 SIZE: {perf_stats['avg_size']}B avg (min={perf_stats['min_size']}B max={perf_stats['max_size']}B)")
                         print(f"      📊 PROC: {perf_stats['avg_processing']:.2f}ms avg (max={perf_stats['max_processing']:.2f}ms)")
