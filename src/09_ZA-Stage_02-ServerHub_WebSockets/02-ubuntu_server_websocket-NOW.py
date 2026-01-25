@@ -693,11 +693,65 @@ def websocket(ws):
     client_type = 'unknown'
     client_identifier = f"{client_ip}:unknown"
     
+    #### jwc 26-0125-0600 NEW: Message counter for debugging hang issue
+    message_count = 0
+    
+    #### jwc 26-0125-0730 FIX: Add socket timeout to prevent freeze on incomplete/corrupted messages
+    import socket
+    try:
+        ws._sock.settimeout(5.0)
+        print(f"*** SvHub: Socket timeout set to 5.0s for {client_ip}")
+    except Exception as e:
+        print(f"*** SvHub: WARNING - Could not set socket timeout: {e}")
+    
     try:
         while True:
-            message = ws.receive()
-            if message is None:
+            #### jwc 26-0125-0600 DEBUG: Print before receive (detect if blocking here)
+            print(f"*** SvHub: [WAIT] Message #{message_count + 1} from {client_ip}...")
+            
+            #### jwc 26-0125-0730 FIX: Wrap ws.receive() in try/except to handle timeouts and errors
+            try:
+                message = ws.receive()
+            except socket.timeout:
+                # Timeout - no complete message received in 5 seconds
+                print(f"*** SvHub: [TIMEOUT] No message from {client_ip} for 5s (last msg #{message_count})")
+                # Send ping to check if connection alive and clear stuck state
+                try:
+                    ping_msg = {'event': 'ping', 'timestamp': time.time()}
+                    ws.send(json.dumps(ping_msg))
+                    print(f"*** SvHub -->> Esp32 {client_ip}: Sent ping (keepalive/recovery)")
+                except Exception as e:
+                    print(f"*** SvHub: Ping failed, connection dead: {e}")
+                    break
+                continue  # Go back to waiting for next message
+            except Exception as e:
+                # Other receive errors (connection closed, corrupted data, etc.)
+                print(f"*** SvHub: [ERROR] ws.receive() failed for {client_ip}: {e}")
                 break
+            
+            #### jwc 26-0125-0600 DEBUG: Print after receive
+            message_count += 1
+            if message is None:
+                print(f"*** SvHub <<-- Esp32 {client_ip}: [CLOSE] Received None after {message_count} messages")
+                break
+            
+            #### jwc 26-0125-0600 DEBUG: Print message details
+            msg_type = "BINARY" if isinstance(message, bytes) else "TEXT"
+            msg_len = len(message) if message else 0
+            msg_preview = message[:100] if isinstance(message, str) else f"<{msg_len} bytes>"
+            print(f"*** SvHub <<-- Esp32 {client_ip}: [RX #{message_count}] Type={msg_type}, Len={msg_len}, Preview={msg_preview}")
+            
+            #### jwc 26-0125-0730 NEW: Validate JSON messages to detect corruption
+            if isinstance(message, str):
+                try:
+                    # Try to parse JSON to ensure it's valid
+                    test_parse = json.loads(message)
+                    print(f"*** SvHub: [VALID] JSON parsed OK")
+                except json.JSONDecodeError as e:
+                    print(f"*** SvHub: [CORRUPT] Invalid JSON at position {e.pos}: {e.msg}")
+                    print(f"*** SvHub: [CORRUPT] Message preview: {message[:200]}")
+                    # Skip this corrupted message and continue
+                    continue
             
             # ============================================================================
             # BINARY MESSAGE HANDLING [jwc 25-1209-1040]

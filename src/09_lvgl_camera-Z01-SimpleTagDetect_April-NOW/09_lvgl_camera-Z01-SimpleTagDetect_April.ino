@@ -73,7 +73,9 @@ const char* AUTH_TOKEN = "Jesus333!!!";
 //// * C:\12i-Db\Dropbox\09k-E32-SM\25-0517-1900-E32--OPENED\13i-T-CameraPlus-S3-NOW-Ubuntu22_BmaxB1Pro--25-0505-0730-NOW\25-1123-1700-E32_TCameraPlusS3-AprilTag-SerialToMicrobit-HttpsCorsToGDevelop\examples\Camera_Screen_AprilTag__Serial_With_Microbit--Esp32_Client_Websocket-NOW\01-Esp32-Client
 //// jwc 26-0124-1215 o const char* ws_host = "76.102.42.17";    // Ubuntu server IP (public IP via port-forward)
 //// jwc 26-0124-0120 y const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win:Hp-Zbook
-const char* ws_host = "10.0.0.149";       // Python server IP (local network): Lin:Bmax-B1Pro
+const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win:Hp-Zbook
+//// jwc 26-0124-0120 y const char* ws_host = "10.0.0.149";       // Python server IP (local network): Lin:Bmax-B1Pro
+
 const uint16_t ws_port = 5000;           // WebSocket server port
 const char* ws_path = "/websocket";      // WebSocket endpoint path
 
@@ -263,12 +265,19 @@ Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled
 //// #define FY 924.713610878 // fy (in pixel)
 //// #define CX 403.801748132 // cx (in pixel)
 //// #define CY 305.082642826 // cy (in pixel)
-//// jwc 26-0124-1030 NEW: Estimated calibration for OV2640 at HVGA (480x320)
-//// Focal length estimates based on typical OV2640 specs and HVGA resolution
-#define FX 480.0 // fx (in pixel) - estimated for HVGA width
-#define FY 480.0 // fy (in pixel) - estimated (square pixels)
-#define CX 240.0 // cx (in pixel) - center of 480px width
-#define CY 160.0 // cy (in pixel) - center of 320px height
+//// jwc 26-0125-0720 ARCHIVED: Previous calibration caused 1-screen-width offset (CX was wrong)
+//// #define FX 480.0 // fx (in pixel) - estimated for HVGA width
+//// #define FY 480.0 // fy (in pixel) - estimated (square pixels)
+//// #define CX 240.0 // cx (in pixel) - center of 480px width
+//// #define CY 160.0 // cy (in pixel) - center of 320px height
+//// jwc 26-0125-0720 NEW: Fixed calibration for HVGA 480x320 (corrects AprilTag position offset)
+//// Previous CX=240.0 was correct but FX/FY were too large, causing detection issues
+//// Scaled from Lilygo's proven 240x240 calibration (FX=200, FY=200, CX=120, CY=120)
+//// For 480x320: FX=400 (2× for 2× width), FY=266.7 (scaled for height), CX=240 (center), CY=160 (center)
+#define FX 400.0 // fx (in pixel) - scaled for 480px width (2× Lilygo's 200.0)
+#define FY 266.7 // fy (in pixel) - scaled for 320px height (200.0 * 320/240)
+#define CX 240.0 // cx (in pixel) - center of 480px width (correct)
+#define CY 160.0 // cy (in pixel) - center of 320px height (correct)
 
 
 /*
