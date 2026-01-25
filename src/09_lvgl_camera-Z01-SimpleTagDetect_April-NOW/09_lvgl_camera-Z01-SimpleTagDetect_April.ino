@@ -72,7 +72,8 @@ const char* AUTH_TOKEN = "Jesus333!!!";
 //// jwc 26-0124-1105 UPDATED: Using same server config as Lilygo T-Camera Plus S3
 //// * C:\12i-Db\Dropbox\09k-E32-SM\25-0517-1900-E32--OPENED\13i-T-CameraPlus-S3-NOW-Ubuntu22_BmaxB1Pro--25-0505-0730-NOW\25-1123-1700-E32_TCameraPlusS3-AprilTag-SerialToMicrobit-HttpsCorsToGDevelop\examples\Camera_Screen_AprilTag__Serial_With_Microbit--Esp32_Client_Websocket-NOW\01-Esp32-Client
 //// jwc 26-0124-1215 o const char* ws_host = "76.102.42.17";    // Ubuntu server IP (public IP via port-forward)
-const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win
+//// jwc 26-0124-0120 y const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win:Hp-Zbook
+const char* ws_host = "10.0.0.149";       // Python server IP (local network): Lin:Bmax-B1Pro
 const uint16_t ws_port = 5000;           // WebSocket server port
 const char* ws_path = "/websocket";      // WebSocket endpoint path
 
@@ -90,6 +91,7 @@ struct AprilTagData {
   float x;
   float y;
   float z;
+  float range;  // Distance from camera to tag (cm)
   unsigned long timestamp;
 };
 AprilTagData tagQueue[MAX_QUEUE_SIZE];
@@ -101,6 +103,26 @@ SemaphoreHandle_t queueMutex = NULL;
 //// jwc 26-0124-1030 Timing control for WebSocket transmission
 unsigned long lastTransmitTime = 0;
 const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
+
+//// jwc 26-0124-1730 NEW: FPS tracking and latest tag data for HUD display
+unsigned long lastFrameTime = 0;
+unsigned long frameCount = 0;
+float currentFPS = 0.0;
+unsigned long fpsUpdateTime = 0;
+const unsigned long FPS_UPDATE_INTERVAL = 1000; // Update FPS every 1 second
+
+//// Latest detected tag data for HUD display
+struct LatestTagDisplay {
+  bool hasData = false;
+  int id = 0;
+  float yaw = 0;
+  float pitch = 0;
+  float roll = 0;
+  float x = 0;
+  float y = 0;
+  float z = 0;
+  float range = 0;  // Distance to tag
+} latestTag;
 
 /*To use the built-in examples and demos of LVGL uncomment the includes below respectively.
  *You also need to copy `lvgl/examples` to `lvgl/src/examples`. Similarly for the demos `lvgl/demos` to `lvgl/src/demos`.
@@ -418,6 +440,72 @@ void draw_comm_button() {
   gfx->print(comm_display_enabled ? "ON" : "OFF");
 }
 
+//// jwc 26-0124-2020 NEW: Draw FPS and AprilTag data HUD overlay
+//// jwc 26-0124-2230 UPDATED: Added heap memory display under FPS
+//// jwc 26-0125-0000 UPDATED: Yellow for rows 2+, font size 2 (1 pixel bigger)
+//// jwc 26-0125-0330 UPDATED: Moved tag data from upper-right to lower-left, improved spacing
+void draw_hud_overlay() {
+  gfx->setTextSize(2);  // Bigger font for HUD (was 1, now 2)
+  
+  //// Draw FPS in top-left corner (semi-transparent background)
+  gfx->fillRect(0, 0, 100, 30, 0x0000);  // Black background (wider/taller for bigger font)
+  gfx->setTextColor(GREEN);
+  gfx->setCursor(2, 2);
+  gfx->printf("FPS:%.1f", currentFPS);
+  
+  //// Draw heap memory under FPS
+  gfx->setCursor(2, 17);  // Adjusted for bigger font
+  uint32_t freeHeap = ESP.getFreeHeap();
+  if (freeHeap < 10000) {
+    gfx->setTextColor(RED);  // Red if low memory
+  } else if (freeHeap < 50000) {
+    gfx->setTextColor(YELLOW);  // Yellow if medium
+  } else {
+    gfx->setTextColor(GREEN);  // Green if plenty
+  }
+  gfx->printf("Mem:%dK", freeHeap / 1024);
+  
+  //// jwc 26-0125-0330 NEW: Draw latest tag data in LOWER-LEFT corner (if available)
+  if (latestTag.hasData) {
+    int x_start = 2;  // Left side, 2px margin
+    int y_start = 320 - 100;  // Bottom of screen, 100px tall
+    int line_h = 18;  // Improved vertical spacing (was 15)
+    int y = y_start;
+    
+    //// Semi-transparent black background
+    gfx->fillRect(0, y_start, 120, 100, 0x0000);  // Lower-left corner
+    
+    //// Tag ID (row 1 - cyan)
+    gfx->setTextColor(CYAN);
+    gfx->setCursor(x_start, y);
+    gfx->printf("ID:%d", latestTag.id);
+    y += line_h;
+    
+    //// Yaw/Pitch/Roll (row 2 - YELLOW per user request)
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(x_start, y);
+    gfx->printf("Y:%.0f P:%.0f R:%.0f", latestTag.yaw, latestTag.pitch, latestTag.roll);
+    y += line_h;
+    
+    //// Range (row 3 - YELLOW per user request)
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(x_start, y);
+    gfx->printf("Rng:%.1fcm", latestTag.range);
+    y += line_h;
+    
+    //// X,Y coordinates (row 4 - YELLOW per user request)
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(x_start, y);
+    gfx->printf("X:%.1f Y:%.1f", latestTag.x, latestTag.y);
+    y += line_h;
+    
+    //// Z coordinate (row 5 - YELLOW per user request)
+    gfx->setTextColor(YELLOW);
+    gfx->setCursor(x_start, y);
+    gfx->printf("Z:%.1fcm", latestTag.z);
+  }
+}
+
 //// jwc 26-0124-1030 PHASE 4: WiFi initialization function
 void initWiFi() {
   Serial.println("*** Initializing WiFi...");
@@ -482,7 +570,17 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
 //// jwc 26-0124-1030 PHASE 6: AprilTag queue & transmission functions
 //// Enqueue detected AprilTag data (called from detection loop)
-void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, float roll, float x, float y, float z) {
+//// jwc 26-0124-1800 UPDATED: Added range parameter
+//// jwc 26-0125-0430 UPDATED: Only enqueue first tag per 1-second interval (drop others to reduce traffic)
+void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, float roll, float x, float y, float z, float range) {
+  //// jwc 26-0125-0430 NEW: Check if we're within 1-second interval since last transmission
+  unsigned long currentTime = millis();
+  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
+    //// Drop this tag - we already have one queued for this interval
+    Serial.printf("*** DROPPED tag ID %d (within 1-sec interval, reducing traffic)\n", id);
+    return;
+  }
+  
   if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     if (queueCount < MAX_QUEUE_SIZE) {
       tagQueue[queueTail].id = id;
@@ -493,12 +591,13 @@ void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, floa
       tagQueue[queueTail].x = x;
       tagQueue[queueTail].y = y;
       tagQueue[queueTail].z = z;
+      tagQueue[queueTail].range = range;
       tagQueue[queueTail].timestamp = millis();
       
       queueTail = (queueTail + 1) % MAX_QUEUE_SIZE;
       queueCount++;
       
-      Serial.printf("*** Enqueued tag ID %d (queue: %d/%d)\n", id, queueCount, MAX_QUEUE_SIZE);
+      Serial.printf("*** Enqueued tag ID %d (queue: %d/%d) - FIRST in 1-sec interval\n", id, queueCount, MAX_QUEUE_SIZE);
     } else {
       Serial.println("*** WARNING: Queue full, dropping tag data!");
     }
@@ -529,16 +628,18 @@ void transmitAprilTags() {
       int transmitted = 0;
       while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
         // Create JSON document for single tag
+        //// jwc 26-0125-0510 UPDATED: Round all decimals to 1 place (reduce network traffic)
         StaticJsonDocument<512> doc;
         doc["event"] = "apriltag_data";
         doc["tag_id"] = tagQueue[queueHead].id;
-        doc["decision_margin"] = tagQueue[queueHead].decision_margin;
-        doc["yaw"] = tagQueue[queueHead].yaw;
-        doc["pitch"] = tagQueue[queueHead].pitch;
-        doc["roll"] = tagQueue[queueHead].roll;
-        doc["x_cm"] = tagQueue[queueHead].x;
-        doc["y_cm"] = tagQueue[queueHead].y;
-        doc["z_cm"] = tagQueue[queueHead].z;
+        doc["decision_margin"] = round(tagQueue[queueHead].decision_margin * 10.0) / 10.0;
+        doc["yaw"] = round(tagQueue[queueHead].yaw * 10.0) / 10.0;
+        doc["pitch"] = round(tagQueue[queueHead].pitch * 10.0) / 10.0;
+        doc["roll"] = round(tagQueue[queueHead].roll * 10.0) / 10.0;
+        doc["x_cm"] = round(tagQueue[queueHead].x * 10.0) / 10.0;
+        doc["y_cm"] = round(tagQueue[queueHead].y * 10.0) / 10.0;
+        doc["z_cm"] = round(tagQueue[queueHead].z * 10.0) / 10.0;
+        doc["range_cm"] = round(tagQueue[queueHead].range * 10.0) / 10.0;
         doc["timestamp"] = tagQueue[queueHead].timestamp;
         doc["camera_name"] = "Waveshare-ESP32-S3";
         doc["smartcam_ip"] = WiFi.localIP().toString();
@@ -640,8 +741,10 @@ static void task(void *param) {
 
 
   //// jwc y but maybe too big? \/ config.frame_size = FRAMESIZE_VGA;
-  //// jwc o config.frame_size = FRAMESIZE_QVGA;
-  config.frame_size = FRAMESIZE_HVGA;
+  //// jwc 26-0124-1730 OPTIMIZATION: Reduce frame size for 2× faster AprilTag detection
+  //// jwc 26-0124-1900 ARCHIVED: config.frame_size = FRAMESIZE_QVGA;  // 320x240 causes cropped/duplicated display
+  //// jwc 26-0124-1900 RESTORED: Keep HVGA for full display, downsample for AprilTag only
+  config.frame_size = FRAMESIZE_HVGA;  // 480x320 for display (full resolution)
 
   //// jwc ? config.pixel_format = PIXFORMAT_GRAYSCALE; // Required for AprilTag processing
   //// jwc oy config.pixel_format = PIXFORMAT_RGB565;  // for streaming
@@ -771,9 +874,21 @@ static void task(void *param) {
       Serial.println("*** Image drawn to screen via GFX");
       #endif
       
+      //// jwc 26-0124-2040 NEW: Update FPS tracking
+      frameCount++;
+      unsigned long currentTime = millis();
+      if (currentTime - fpsUpdateTime >= FPS_UPDATE_INTERVAL) {
+        currentFPS = frameCount * 1000.0 / (currentTime - fpsUpdateTime);
+        frameCount = 0;
+        fpsUpdateTime = currentTime;
+      }
+      
       //// jwc 26-0109-1520 NEW: Draw comm overlay and button after camera image
       draw_comm_overlay();  // Draw yellow text if enabled
       draw_comm_button();   // Always draw button at bottom
+      
+      //// jwc 26-0124-2040 NEW: Draw HUD overlay (FPS + latest tag data)
+      draw_hud_overlay();
       
       //// jwc 26-0109-1620 NEW: Direct touch polling for button (bypasses LVGL)
       //// Touch handler in LVGL doesn't sync with GFX rendering, so poll directly here
@@ -802,21 +917,72 @@ static void task(void *param) {
     #if DEBUG >= 3
     Serial.println("Converting frame to detector's input format... ");
 #endif
-    //// jwc 26-0109-2200 ARCHIVED: Process full 480x320 camera frame
+    //// jwc 26-0124-1900 ARCHIVED: Crop to visible display area (240x320) - caused issues
     //// image_u8_t im = {
-    ////   .width = camera_framebuffer_pic_ObjPtr->width,
-    ////   .height = camera_framebuffer_pic_ObjPtr->height,
-    ////   .stride = camera_framebuffer_pic_ObjPtr->width,
+    ////   .width = 240,  // Match display width (was 480)
+    ////   .height = 320,  // Keep full height
+    ////   .stride = camera_framebuffer_pic_ObjPtr->width,  // Keep original stride for proper addressing
     ////   .buf = camera_framebuffer_pic_ObjPtr->buf
     //// };
     
-    //// jwc 26-0109-2200 NEW: Crop to visible display area (240x320)
-    //// Only process the left 240px width that's actually displayed
-    //// This prevents detecting tags on the right half (240-480px) that aren't visible
+    //// jwc 26-0124-2200 ARCHIVED: Downsampling optimization (C struct const members unfixable)
+    //// jwc 26-0124-2200 ARCHIVED: //// jwc 26-0124-1900 NEW: Downsample HVGA (480x320) to QVGA (240x160) for AprilTag processing
+    //// jwc 26-0124-2200 ARCHIVED: //// Display stays full resolution, but AprilTag processes smaller image (4× faster!)
+    //// jwc 26-0124-2200 ARCHIVED: //// Strategy: Skip every other pixel in both X and Y directions
+    //// jwc 26-0124-2200 ARCHIVED: //// 
+    //// jwc 26-0124-2200 ARCHIVED: //// jwc 26-0124-2010 OPTIMIZATION EXPLANATION:
+    //// jwc 26-0124-2200 ARCHIVED: //// * Camera captures: 480×320 = 153,600 pixels (display stays full resolution!)
+    //// jwc 26-0124-2200 ARCHIVED: //// * Downsample to: 240×160 = 38,400 pixels (skip every 2nd pixel)
+    //// jwc 26-0124-2200 ARCHIVED: //// * AprilTag processes: ONLY 38,400 pixels (4× fewer!)
+    //// jwc 26-0124-2200 ARCHIVED: //// * Processing time: ~50ms per frame (4× faster!)
+    //// jwc 26-0124-2200 ARCHIVED: 
+    //// jwc 26-0124-2200 ARCHIVED: //// Allocate downsampled buffer (240x160 = 38,400 bytes) - static so allocated only once
+    //// jwc 26-0124-2200 ARCHIVED: static uint8_t *downsample_buf = NULL;
+    //// jwc 26-0124-2200 ARCHIVED: static image_u8_t fullres_im = {0};
+    //// jwc 26-0124-2200 ARCHIVED: static image_u8_t downsampled_im = {0};
+    //// jwc 26-0124-2200 ARCHIVED: 
+    //// jwc 26-0124-2200 ARCHIVED: //// jwc 26-0124-2030 FIX: Use pointer to struct (proper C approach, no copy needed)
+    //// jwc 26-0124-2200 ARCHIVED: image_u8_t *im_ptr;
+    //// jwc 26-0124-2200 ARCHIVED: 
+    //// jwc 26-0124-2200 ARCHIVED: if (downsample_buf == NULL) {
+    //// jwc 26-0124-2200 ARCHIVED:   downsample_buf = (uint8_t *)heap_caps_malloc(240 * 160, MALLOC_CAP_SPIRAM);
+    //// jwc 26-0124-2200 ARCHIVED:   if (!downsample_buf) {
+    //// jwc 26-0124-2200 ARCHIVED:     Serial.println("*** ERROR: Failed to allocate downsample buffer!");
+    //// jwc 26-0124-2200 ARCHIVED:     // Fall back to full resolution processing
+    //// jwc 26-0124-2200 ARCHIVED:     fullres_im.width = camera_framebuffer_pic_ObjPtr->width;
+    //// jwc 26-0124-2200 ARCHIVED:     fullres_im.height = camera_framebuffer_pic_ObjPtr->height;
+    //// jwc 26-0124-2200 ARCHIVED:     fullres_im.stride = camera_framebuffer_pic_ObjPtr->width;
+    //// jwc 26-0124-2200 ARCHIVED:     fullres_im.buf = camera_framebuffer_pic_ObjPtr->buf;
+    //// jwc 26-0124-2200 ARCHIVED:     im_ptr = &fullres_im;
+    //// jwc 26-0124-2200 ARCHIVED:     goto skip_downsample;
+    //// jwc 26-0124-2200 ARCHIVED:   }
+    //// jwc 26-0124-2200 ARCHIVED:   Serial.println("*** Downsample buffer allocated (240x160)");
+    //// jwc 26-0124-2200 ARCHIVED: }
+    //// jwc 26-0124-2200 ARCHIVED: 
+    //// jwc 26-0124-2200 ARCHIVED: //// Downsample: Take every 2nd pixel in X and Y (2× reduction in each dimension = 4× total)
+    //// jwc 26-0124-2200 ARCHIVED: uint8_t *src = camera_framebuffer_pic_ObjPtr->buf;
+    //// jwc 26-0124-2200 ARCHIVED: uint8_t *dst = downsample_buf;
+    //// jwc 26-0124-2200 ARCHIVED: for (int y = 0; y < 160; y++) {
+    //// jwc 26-0124-2200 ARCHIVED:   for (int x = 0; x < 240; x++) {
+    //// jwc 26-0124-2200 ARCHIVED:     // Source pixel at (x*2, y*2) in 480x320 image
+    //// jwc 26-0124-2200 ARCHIVED:     dst[y * 240 + x] = src[(y * 2) * 480 + (x * 2)];
+    //// jwc 26-0124-2200 ARCHIVED:   }
+    //// jwc 26-0124-2200 ARCHIVED: }
+    //// jwc 26-0124-2200 ARCHIVED: 
+    //// jwc 26-0124-2200 ARCHIVED: //// Point to downsampled image for AprilTag detector
+    //// jwc 26-0124-2200 ARCHIVED: downsampled_im.width = 240;
+    //// jwc 26-0124-2200 ARCHIVED: downsampled_im.height = 160;
+    //// jwc 26-0124-2200 ARCHIVED: downsampled_im.stride = 240;
+    //// jwc 26-0124-2200 ARCHIVED: downsampled_im.buf = downsample_buf;
+    //// jwc 26-0124-2200 ARCHIVED: im_ptr = &downsampled_im;
+    //// jwc 26-0124-2200 ARCHIVED: 
+    //// jwc 26-0124-2200 ARCHIVED: skip_downsample:
+    
+    //// jwc 26-0124-2200 NEW: Use full resolution for AprilTag processing (slower but works)
     image_u8_t im = {
-      .width = 240,  // Match display width (was 480)
-      .height = 320,  // Keep full height
-      .stride = camera_framebuffer_pic_ObjPtr->width,  // Keep original stride for proper addressing
+      .width = camera_framebuffer_pic_ObjPtr->width,
+      .height = camera_framebuffer_pic_ObjPtr->height,
+      .stride = camera_framebuffer_pic_ObjPtr->width,
       .buf = camera_framebuffer_pic_ObjPtr->buf
     };
 #if DEBUG >= 3
@@ -869,20 +1035,53 @@ static void task(void *param) {
 
 
 if(zarray_size(detections) > 0){
-  //// jwc oo tft.setCursor(1,1);
-  gfx->setCursor(1,1);
-  //// jwc y good for nomral, but increase for VideoMeet-Cam \/: tft.setTextSize(2); tft.setTextSize(3);
-  //// jwc y tft.setTextSize(4);
-  //// jwc y seems just right to fit 6 max
-  //// jwc oo tft.setTextSize(5);
-  gfx->setTextSize(5);
+  //// jwc 26-0124-2240 NEW: Find tag closest to screen center (480x320 → center at 240,160)
+  int closest_idx = -1;
+  float min_dist_to_center = 999999.0;
+  float screen_center_x = 240.0;
+  float screen_center_y = 160.0;
   
-  // Print result
   for (int i = 0; i < zarray_size(detections); i++) {
+    apriltag_detection_t *det;
+    zarray_get(detections, i, &det);
+    
+    // Calculate distance from tag center to screen center
+    float dx = det->c[0] - screen_center_x;
+    float dy = det->c[1] - screen_center_y;
+    float dist = sqrt(dx*dx + dy*dy);
+    
+    if (dist < min_dist_to_center) {
+      min_dist_to_center = dist;
+      closest_idx = i;
+    }
+  }
+  
+  //// jwc 26-0124-2240 Process ONLY the closest tag (prevents freeze with multiple tags)
+  //// jwc 26-0125-0400 UPDATED: Moved tag ID display from upper-left to upper-right
+  if (closest_idx >= 0) {
+    //// jwc 26-0125-0400 ARCHIVED: Original upper-left tag ID display
+    //// jwc 26-0125-0400 ARCHIVED: //// jwc oo tft.setCursor(1,1);
+    //// jwc 26-0125-0400 ARCHIVED: gfx->setCursor(1,1);
+    //// jwc 26-0125-0400 ARCHIVED: //// jwc y good for nomral, but increase for VideoMeet-Cam \/: tft.setTextSize(2); tft.setTextSize(3);
+    //// jwc 26-0125-0400 ARCHIVED: //// jwc y tft.setTextSize(4);
+    //// jwc 26-0125-0400 ARCHIVED: //// jwc y seems just right to fit 6 max
+    //// jwc 26-0125-0400 ARCHIVED: //// jwc oo tft.setTextSize(5);
+    //// jwc 26-0125-0400 ARCHIVED: gfx->setTextSize(5);
+    
+    // Process only the closest tag
+    int i = closest_idx;
       apriltag_detection_t *det;
       zarray_get(detections, i, &det);
       //// jwc \/
       //// jwc y Serial.print(" *** ");
+      
+      //// jwc 26-0125-0400 NEW: Display tag ID in upper-right corner (large font)
+      gfx->setTextSize(5);
+      
+      //// Calculate x position for right-aligned text (approximate width: 80px for 2 digits)
+      int tag_id_width = 80;  // Approximate width for "XX " with size 5 font
+      int x_pos = 240 - tag_id_width;  // Right-align
+      gfx->setCursor(x_pos, 1);
       
       if(det->id % 2 == 0){
         // Even #
@@ -957,20 +1156,40 @@ if(zarray_size(detections) > 0){
       // Compute the position of the camera in the tag's coordinate system
       matd_t *camera_position = matd_multiply(R_transpose, pose.t);
       
+      //// jwc 26-0124-1745 CRITICAL FIX: Extract x,y,z values BEFORE freeing matrices!
+      //// Bug was: matrices freed, THEN we tried to read from freed memory → always 0!
+      float x_cm = MATD_EL(camera_position, 0, 0) * 100.0;  // Convert meters to cm
+      float y_cm = MATD_EL(camera_position, 1, 0) * 100.0;
+      float z_cm = MATD_EL(camera_position, 2, 0) * 100.0;
+      
+      //// jwc 26-0124-1800 NEW: Calculate range (3D distance from camera to tag)
+      float range_cm = sqrt(x_cm*x_cm + y_cm*y_cm + z_cm*z_cm);
+      
       //// jwc 26-0124-1335 UPDATED: Single-line AprilTag detection output (keep original printf for screen display)
       printf("*** *** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
       printf(" *** y,p,r: %5.0f, %5.0f, %5.0f", yaw, pitch, roll);
-      printf(" *** x,y,z: %5.0f, %5.0f, %5.0f\n", MATD_EL(camera_position, 0, 0), MATD_EL(camera_position, 1, 0), MATD_EL(camera_position, 2, 0));
+      printf(" *** x,y,z: %.1f, %.1f, %.1f cm, range: %.1f cm\n", x_cm, y_cm, z_cm, range_cm);
 
-      // Free the matrices
+      // Free the matrices (AFTER extracting values!)
       matd_destroy(R_transpose);
       matd_destroy(camera_position);
 
+      //// jwc 26-0124-2050 NEW: Update latestTag struct for HUD display
+      latestTag.hasData = true;
+      latestTag.id = det->id;
+      latestTag.yaw = yaw;
+      latestTag.pitch = pitch;
+      latestTag.roll = roll;
+      latestTag.x = x_cm;
+      latestTag.y = y_cm;
+      latestTag.z = z_cm;
+      latestTag.range = range_cm;
+      
       //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for WebSocket transmission
+      //// jwc 26-0124-1745 FIX: Use extracted values (not freed memory!)
+      //// jwc 26-0124-1800 NEW: Pass range to enqueue function
       enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
-                      MATD_EL(camera_position, 0, 0), 
-                      MATD_EL(camera_position, 1, 0), 
-                      MATD_EL(camera_position, 2, 0));
+                      x_cm, y_cm, z_cm, range_cm);
   }
   //// jwc o Serial.println("");
   printf("\n");
@@ -1151,8 +1370,9 @@ void setup() {
   //// jwc no improvement seems: td->decode_sharpening = 0.25;
   td->decode_sharpening = 0;
 
-  //// jwc TODO: td->nthreads = 2; // The optimal (after many tries) is 2 thread on 2 cores ESP32
-  td->nthreads = 1;
+  //// jwc 26-0124-1730 OPTIMIZATION: Enable multi-threading for 1.5-2× faster AprilTag detection
+  //// jwc OLD (slow): td->nthreads = 1;  // Single core only
+  td->nthreads = 2;  // Use both ESP32 cores (1.5-2× faster!)
 
   //// jwc o 25-0408-1930 \/ td->debug = 0;
   //// jwc ? td->debug = 1;
