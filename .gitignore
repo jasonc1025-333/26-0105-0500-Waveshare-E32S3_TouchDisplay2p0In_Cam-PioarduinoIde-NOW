@@ -15,3 +15,6 @@ __pycache__/
 .Python
 pip-log.txt
 pip-delete-this-directory.txt
+
+# jwc 26-0126-2330 Ignorable files since opened VSCode on multiple machines via Dropbox
+.vscode/*conflicted copy*

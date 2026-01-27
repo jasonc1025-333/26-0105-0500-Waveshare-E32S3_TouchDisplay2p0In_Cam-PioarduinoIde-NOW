@@ -34,6 +34,7 @@ from datetime import datetime
 import threading
 import logging
 import re
+import queue  #### jwc 26-0126-2035 NEW: For threading timeout workaround
 
 # ============================================================================
 # CONFIGURATION
@@ -447,6 +448,57 @@ def fix_json_quotes(message):
     return fixed
 
 # ============================================================================
+# THREADING TIMEOUT WORKAROUND [jwc 26-0126-2035]
+# ============================================================================
+# flask-sock's ws.receive() doesn't respect socket timeout, so we use threading
+# to implement timeout functionality. This prevents server freeze on incomplete messages.
+
+def receive_with_timeout(ws, timeout=5.0):
+    """
+    Receive WebSocket message with timeout using threading workaround.
+    
+    Args:
+        ws: WebSocket connection object
+        timeout: Timeout in seconds (default 5.0)
+    
+    Returns:
+        (message, error) tuple:
+        - (message, None) if successful
+        - (None, 'timeout') if timeout
+        - (None, exception) if error
+    
+    Why needed:
+        flask-sock's ws.receive() blocks forever on incomplete/corrupted messages.
+        Socket timeout doesn't work because flask-sock uses internal buffering.
+        Threading allows us to detect timeout and recover gracefully.
+    """
+    result_queue = queue.Queue()
+    
+    def receive_thread():
+        """Background thread that calls ws.receive()"""
+        try:
+            msg = ws.receive()
+            result_queue.put(('success', msg))
+        except Exception as e:
+            result_queue.put(('error', e))
+    
+    # Start receive in background thread (daemon=True so it doesn't block shutdown)
+    thread = threading.Thread(target=receive_thread, daemon=True)
+    thread.start()
+    
+    # Wait for result with timeout
+    try:
+        status, data = result_queue.get(timeout=timeout)
+        if status == 'success':
+            return (data, None)
+        else:
+            return (None, data)
+    except queue.Empty:
+        # Timeout - thread still blocked in ws.receive()
+        # Thread will be abandoned (daemon) but that's OK
+        return (None, 'timeout')
+
+# ============================================================================
 # SECURITY FUNCTIONS
 # ============================================================================
 
@@ -696,37 +748,67 @@ def websocket(ws):
     #### jwc 26-0125-0600 NEW: Message counter for debugging hang issue
     message_count = 0
     
-    #### jwc 26-0125-0730 FIX: Add socket timeout to prevent freeze on incomplete/corrupted messages
-    import socket
-    try:
-        ws._sock.settimeout(5.0)
-        print(f"*** SvHub: Socket timeout set to 5.0s for {client_ip}")
-    except Exception as e:
-        print(f"*** SvHub: WARNING - Could not set socket timeout: {e}")
+    #### jwc 26-0126-2100 ARCHIVED: Socket timeout approach (didn't work - flask-sock ignores it)
+    #### #### jwc 26-0125-0730 FIX: Add socket timeout to prevent freeze on incomplete/corrupted messages
+    #### import socket
+    #### try:
+    ####     ws._sock.settimeout(5.0)
+    ####     print(f"*** SvHub: Socket timeout set to 5.0s for {client_ip}")
+    #### except Exception as e:
+    ####     print(f"*** SvHub: WARNING - Could not set socket timeout: {e}")
     
     try:
         while True:
             #### jwc 26-0125-0600 DEBUG: Print before receive (detect if blocking here)
             print(f"*** SvHub: [WAIT] Message #{message_count + 1} from {client_ip}...")
             
-            #### jwc 26-0125-0730 FIX: Wrap ws.receive() in try/except to handle timeouts and errors
-            try:
-                message = ws.receive()
-            except socket.timeout:
+            #### jwc 26-0126-2100 ARCHIVED: Socket timeout approach (didn't work - flask-sock ignores it)
+            #### #### jwc 26-0125-0730 FIX: Wrap ws.receive() in try/except to handle timeouts and errors
+            #### try:
+            ####     message = ws.receive()
+            #### except socket.timeout:
+            ####     # Timeout - no complete message received in 5 seconds
+            ####     print(f"*** SvHub: [TIMEOUT] No message from {client_ip} for 5s (last msg #{message_count})")
+            ####     # Send ping to check if connection alive and clear stuck state
+            ####     try:
+            ####         ping_msg = {'event': 'ping', 'timestamp': time.time()}
+            ####         ws.send(json.dumps(ping_msg))
+            ####         print(f"*** SvHub -->> Esp32 {client_ip}: Sent ping (keepalive/recovery)")
+            ####     except Exception as e:
+            ####         print(f"*** SvHub: Ping failed, connection dead: {e}")
+            ####         break
+            ####     continue  # Go back to waiting for next message
+            #### except Exception as e:
+            ####     # Other receive errors (connection closed, corrupted data, etc.)
+            ####     print(f"*** SvHub: [ERROR] ws.receive() failed for {client_ip}: {e}")
+            ####     break
+            
+            #### jwc 26-0126-2100 NEW: Threading timeout workaround (flask-sock doesn't respect socket timeout)
+            message, error = receive_with_timeout(ws, timeout=5.0)
+            
+            #### jwc 26-0126-2240 ARCHIVED: Ping recovery approach (didn't work - piles up blocked threads)
+            #### if error == 'timeout':
+            ####     # Timeout - no complete message received in 5 seconds
+            ####     print(f"*** SvHub: [TIMEOUT] No message from {client_ip} for 5s (last msg #{message_count})")
+            ####     # Send ping to check if connection alive and clear stuck state
+            ####     try:
+            ####         ping_msg = {'event': 'ping', 'timestamp': time.time()}
+            ####         ws.send(json.dumps(ping_msg))
+            ####         print(f"*** SvHub -->> Esp32 {client_ip}: Sent ping (keepalive/recovery)")
+            ####     except Exception as e:
+            ####         print(f"*** SvHub: Ping failed, connection dead: {e}")
+            ####         break
+            ####     continue  # Go back to waiting for next message
+
+            #### jwc 26-0126-2240 NEW: Close connection on timeout (ESP32 will auto-reconnect in 5s)
+            if error == 'timeout':
                 # Timeout - no complete message received in 5 seconds
                 print(f"*** SvHub: [TIMEOUT] No message from {client_ip} for 5s (last msg #{message_count})")
-                # Send ping to check if connection alive and clear stuck state
-                try:
-                    ping_msg = {'event': 'ping', 'timestamp': time.time()}
-                    ws.send(json.dumps(ping_msg))
-                    print(f"*** SvHub -->> Esp32 {client_ip}: Sent ping (keepalive/recovery)")
-                except Exception as e:
-                    print(f"*** SvHub: Ping failed, connection dead: {e}")
-                    break
-                continue  # Go back to waiting for next message
-            except Exception as e:
+                print(f"*** SvHub: [TIMEOUT] Closing connection - ESP32 will auto-reconnect in 5s")
+                break  # Exit loop, close connection cleanly
+            elif error:
                 # Other receive errors (connection closed, corrupted data, etc.)
-                print(f"*** SvHub: [ERROR] ws.receive() failed for {client_ip}: {e}")
+                print(f"*** SvHub: [ERROR] receive_with_timeout() failed for {client_ip}: {error}")
                 break
             
             #### jwc 26-0125-0600 DEBUG: Print after receive

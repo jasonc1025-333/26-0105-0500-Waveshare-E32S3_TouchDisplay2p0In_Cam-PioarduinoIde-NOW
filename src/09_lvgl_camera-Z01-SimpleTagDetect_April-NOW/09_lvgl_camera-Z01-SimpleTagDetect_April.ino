@@ -73,7 +73,7 @@ const char* AUTH_TOKEN = "Jesus333!!!";
 //// * C:\12i-Db\Dropbox\09k-E32-SM\25-0517-1900-E32--OPENED\13i-T-CameraPlus-S3-NOW-Ubuntu22_BmaxB1Pro--25-0505-0730-NOW\25-1123-1700-E32_TCameraPlusS3-AprilTag-SerialToMicrobit-HttpsCorsToGDevelop\examples\Camera_Screen_AprilTag__Serial_With_Microbit--Esp32_Client_Websocket-NOW\01-Esp32-Client
 //// jwc 26-0124-1215 o const char* ws_host = "76.102.42.17";    // Ubuntu server IP (public IP via port-forward)
 //// jwc 26-0124-0120 y const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win:Hp-Zbook
-const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win:Hp-Zbook
+const char* ws_host = "10.0.0.90";       // Python server IP (local network): Win:Hp-Zbook
 //// jwc 26-0124-0120 y const char* ws_host = "10.0.0.149";       // Python server IP (local network): Lin:Bmax-B1Pro
 
 const uint16_t ws_port = 5000;           // WebSocket server port

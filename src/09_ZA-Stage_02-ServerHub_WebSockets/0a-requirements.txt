@@ -34,4 +34,4 @@ eventlet==0.35.2                # Async networking library (recommended for pyth
 #### jwc 26-0125-0900 ARCHIVED: flask-sock (replaced by python-socketio)
 #### Flask==3.0.0          # Latest stable Flask (no need to downgrade!)
 #### Flask-CORS==4.0.0     # CORS support for cross-origin requests
-#### flask-sock==0.6.0     # Reliable WebSocket implementation (works with Flask 3.x!)
+flask-sock==0.6.0     # Reliable WebSocket implementation (works with Flask 3.x!)
