@@ -55,11 +55,21 @@
 //// Replaces simple Serial1 code in loop() with proper line buffering and timing
 #include "Serial_Comms.h"
 
+//// jwc 26-0128-0730 NEW: Preprocessor flag to disable networking for memory leak testing
+//// Set to 1 to enable WiFi/WebSocket, 0 to disable (AprilTag-only mode)
+#define DEFINE_NETWORKING_ON 0  // Change to 0 to test without networking
+
+#if DEFINE_NETWORKING_ON
 //// jwc 26-0124-1030 PHASE 1: WiFi & WebSocket includes + configuration
 #include <WiFi.h>
-#include <WebSocketsClient.h>
+//// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient (memory leak after 2 minutes)
+//// #include <WebSocketsClient.h>
+//// jwc 26-0128-0500 NEW: ArduinoWebsockets by gilmaimon (modern, better memory management)
+#include <ArduinoWebsockets.h>
 #include <ArduinoJson.h>
+#endif
 
+#if DEFINE_NETWORKING_ON
 //// jwc 26-0124-1030 WiFi credentials (update these for your network)
 const char* ssid = "Chan-Comcast";
 const char* password = "Jesus333!";
@@ -79,7 +89,11 @@ const char* ws_host = "10.0.0.90";       // Python server IP (local network): Wi
 const uint16_t ws_port = 5100;           // WebSocket server port (jwc 26-0127-0710: Changed from 5000 to 5100 for async server)
 const char* ws_path = "/";               // WebSocket endpoint path (jwc 26-0127-0710: Changed from "/websocket" to "/" for websockets library)
 
-WebSocketsClient webSocket;
+//// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient object
+//// WebSocketsClient webSocket;
+//// jwc 26-0128-0500 NEW: ArduinoWebsockets client object
+using namespace websockets;
+WebsocketsClient webSocket;
 
 //// jwc 26-0124-1030 PHASE 2: AprilTag data queue & timing
 //// Queue to store detected AprilTag data for transmission
@@ -105,6 +119,7 @@ SemaphoreHandle_t queueMutex = NULL;
 //// jwc 26-0124-1030 Timing control for WebSocket transmission
 unsigned long lastTransmitTime = 0;
 const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
+#endif
 
 //// jwc 26-0124-1730 NEW: FPS tracking and latest tag data for HUD display
 unsigned long lastFrameTime = 0;
@@ -515,6 +530,7 @@ void draw_hud_overlay() {
   }
 }
 
+#if DEFINE_NETWORKING_ON
 //// jwc 26-0124-1030 PHASE 4: WiFi initialization function
 void initWiFi() {
   Serial.println("*** Initializing WiFi...");
@@ -537,44 +553,76 @@ void initWiFi() {
   }
 }
 
-//// jwc 26-0124-1030 PHASE 5: WebSocket event handler
-//// jwc 26-0124-1240 UPDATED: Send identify message on connect
-void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
-  switch(type) {
-    case WStype_DISCONNECTED:
+//// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient event handler (callback-based)
+//// void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+////   switch(type) {
+////     case WStype_DISCONNECTED:
+////       Serial.println("*** WebSocket disconnected!");
+////       break;
+////     case WStype_CONNECTED:
+////       {
+////         Serial.printf("*** WebSocket connected to: %s\n", payload);
+////         
+////         StaticJsonDocument<256> identifyDoc;
+////         identifyDoc["event"] = "identify";
+////         JsonObject identifyData = identifyDoc.createNestedObject("data");
+////         identifyData["type"] = "esp32";
+////         identifyData["device"] = "Waveshare-ESP32-S3-Touch-LCD-2";
+////         identifyData["auth_token"] = AUTH_TOKEN;
+////         
+////         String identifyJson;
+////         serializeJson(identifyDoc, identifyJson);
+////         webSocket.sendTXT(identifyJson);
+////         
+////         Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", identifyJson.c_str());
+////       }
+////       break;
+////     case WStype_TEXT:
+////       {
+////         Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", payload);
+////       }
+////       break;
+////     case WStype_ERROR:
+////       Serial.println("*** WebSocket ERROR!");
+////       break;
+////     default:
+////       break;
+////   }
+//// }
+
+//// jwc 26-0128-0500 NEW: ArduinoWebsockets event handlers (lambda-based)
+void setupWebSocketHandlers() {
+  // Connection opened
+  webSocket.onMessage([](WebsocketsMessage message) {
+    Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", message.data().c_str());
+  });
+  
+  webSocket.onEvent([](WebsocketsEvent event, String data) {
+    if (event == WebsocketsEvent::ConnectionOpened) {
+      Serial.println("*** WebSocket connected!");
+      
+      // Send identify message with authentication
+      StaticJsonDocument<256> identifyDoc;
+      identifyDoc["event"] = "identify";
+      JsonObject identifyData = identifyDoc.createNestedObject("data");
+      identifyData["type"] = "esp32";
+      identifyData["device"] = "Waveshare-ESP32-S3-Touch-LCD-2";
+      identifyData["auth_token"] = AUTH_TOKEN;
+      
+      char identifyBuffer[256];
+      serializeJson(identifyDoc, identifyBuffer, sizeof(identifyBuffer));
+      webSocket.send(identifyBuffer);
+      identifyDoc.clear();
+      
+      Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", identifyBuffer);
+    } else if (event == WebsocketsEvent::ConnectionClosed) {
       Serial.println("*** WebSocket disconnected!");
-      break;
-    case WStype_CONNECTED:
-      {
-        Serial.printf("*** WebSocket connected to: %s\n", payload);
-        
-        //// jwc 26-0124-1240 Send identify message with authentication
-        StaticJsonDocument<256> identifyDoc;
-        identifyDoc["event"] = "identify";
-        JsonObject identifyData = identifyDoc.createNestedObject("data");
-        identifyData["type"] = "esp32";
-        identifyData["device"] = "Waveshare-ESP32-S3-Touch-LCD-2";
-        identifyData["auth_token"] = AUTH_TOKEN;
-        
-        String identifyJson;
-        serializeJson(identifyDoc, identifyJson);
-        webSocket.sendTXT(identifyJson);
-        
-        Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", identifyJson.c_str());
-      }
-      break;
-    case WStype_TEXT:
-      {
-        //// jwc 26-0124-1340 NEW: Debug print with arrow convention
-        Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", payload);
-      }
-      break;
-    case WStype_ERROR:
-      Serial.println("*** WebSocket ERROR!");
-      break;
-    default:
-      break;
-  }
+    } else if (event == WebsocketsEvent::GotPing) {
+      Serial.println("*** WebSocket ping received");
+    } else if (event == WebsocketsEvent::GotPong) {
+      Serial.println("*** WebSocket pong received");
+    }
+  });
 }
 
 //// jwc 26-0124-1030 PHASE 6: AprilTag queue & transmission functions
@@ -640,7 +688,10 @@ void transmitAprilTags() {
   //// jwc 26-0127-2100 y }
   
   // Check if WebSocket is connected
-  if (!webSocket.isConnected()) {
+  //// jwc 26-0128-0500 ARCHIVED: Links2004 isConnected method
+  //// if (!webSocket.isConnected()) {
+  //// jwc 26-0128-0500 NEW: ArduinoWebsockets available method
+  if (!webSocket.available()) {
     Serial.println("*** WebSocket not connected, skipping transmission");
     return;
   }
@@ -683,7 +734,10 @@ void transmitAprilTags() {
         //// NEW: Use stack-allocated buffer (auto-freed when function returns)
         char jsonBuffer[512];  // Stack-allocated, matches StaticJsonDocument size
         size_t len = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
-        webSocket.sendTXT(jsonBuffer, len);
+        //// jwc 26-0128-0500 ARCHIVED: Links2004 sendTXT method
+        //// webSocket.sendTXT(jsonBuffer, len);
+        //// jwc 26-0128-0500 NEW: ArduinoWebsockets send method
+        webSocket.send(jsonBuffer);
         
         //// jwc 26-0127-2150 CRITICAL FIX #2: Clear JSON document to prevent DRAM leak
         doc.clear();
@@ -705,6 +759,7 @@ void transmitAprilTags() {
     xSemaphoreGive(queueMutex);
   }
 }
+#endif
 
 
 static void task(void *param) {
@@ -1232,11 +1287,13 @@ if(zarray_size(detections) > 0){
       latestTag.z = z_cm;
       latestTag.range = range_cm;
       
+      #if DEFINE_NETWORKING_ON
       //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for WebSocket transmission
       //// jwc 26-0124-1745 FIX: Use extracted values (not freed memory!)
       //// jwc 26-0124-1800 NEW: Pass range to enqueue function
       enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
                       x_cm, y_cm, z_cm, range_cm);
+      #endif
   }
   //// jwc o Serial.println("");
   printf("\n");
@@ -1264,11 +1321,16 @@ if(zarray_size(detections) > 0){
     esp_camera_fb_return(camera_framebuffer_pic_ObjPtr);
     camera_framebuffer_pic_ObjPtr = NULL;
     
+    #if DEFINE_NETWORKING_ON
     //// jwc 26-0124-1030 PHASE 7: Transmit queued AprilTags via WebSocket
     transmitAprilTags();
     
     //// jwc 26-0124-1030 PHASE 7: Process WebSocket events
-    webSocket.loop();
+    //// jwc 26-0128-0500 ARCHIVED: Links2004 loop method
+    //// webSocket.loop();
+    //// jwc 26-0128-0500 NEW: ArduinoWebsockets poll method
+    webSocket.poll();
+    #endif
     
     vTaskDelay(pdMS_TO_TICKS(1));
     //// jwc 26-0127-2140 NOTE: camera_framebuffer_pic_ObjPtr already freed after AprilTag detection
@@ -1441,6 +1503,7 @@ void setup() {
 #endif
 
 
+  #if DEFINE_NETWORKING_ON
   //// jwc 26-0124-1030 PHASE 7: Initialize WiFi and WebSocket
   initWiFi();
   
@@ -1453,10 +1516,26 @@ void setup() {
   }
   
   //// jwc 26-0124-1030 PHASE 7: Initialize WebSocket client
-  webSocket.begin(ws_host, ws_port, ws_path);
-  webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(5000);
-  Serial.println("*** WebSocket client initialized");
+  //// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient initialization
+  //// webSocket.begin(ws_host, ws_port, ws_path);
+  //// webSocket.onEvent(webSocketEvent);
+  //// webSocket.setReconnectInterval(5000);
+  //// jwc 26-0128-0500 NEW: ArduinoWebsockets initialization
+  setupWebSocketHandlers();
+  
+  // Build WebSocket URL
+  char ws_url[128];
+  snprintf(ws_url, sizeof(ws_url), "ws://%s:%d%s", ws_host, ws_port, ws_path);
+  
+  bool connected = webSocket.connect(ws_url);
+  if (connected) {
+    Serial.printf("*** WebSocket client connected to: %s\n", ws_url);
+  } else {
+    Serial.printf("*** ERROR: WebSocket connection failed to: %s\n", ws_url);
+  }
+  #else
+  Serial.println("*** NETWORKING DISABLED - AprilTag-only mode for memory leak testing");
+  #endif
 
   Serial.println("Setup done");
 

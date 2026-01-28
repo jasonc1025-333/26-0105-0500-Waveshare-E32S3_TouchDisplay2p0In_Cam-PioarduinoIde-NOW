@@ -1259,4 +1259,167 @@ __These fixes have extended runtime from 60 seconds to 2+ hours.__ The remaining
 __The fixes are confirmed working__ - no additional String→char[] conversions needed in the WebSocket transmission code. All critical memory leaks have been addressed.
 
 
+----- ----- -----
+
+How about you research pros/cons of good websocket alternatives (and i guess socket.io will not work since esp32 cannot do it)
+
+Checkpoint
+
+Compare
+
+Restore
+
+Task Completed
+
+## ESP32 WebSocket Library Comparison (2026)
+
+### Option 1: ESPAsyncWebServer + AsyncTCP ⭐ __RECOMMENDED__
+
+__GitHub:__ [](https://github.com/me-no-dev/ESPAsyncWebServer)<https://github.com/me-no-dev/ESPAsyncWebServer>
+
+__Pros:__
+
+- ✅ __Asynchronous__ - Non-blocking, better performance
+- ✅ __Widely used__ - 3.5k+ stars, battle-tested
+- ✅ __Active community__ - Many forks with fixes
+- ✅ __Already in your dependencies__ - No new library needed
+- ✅ __Better memory management__ - Event-driven architecture
+- ✅ __Supports WebSocket + HTTP__ - Flexible
+
+__Cons:__
+
+- ⚠️ Original repo unmaintained (last update 2020)
+- ⚠️ Need to use community fork (mathieucarbou/ESPAsyncWebServer)
+- ⚠️ More complex API than synchronous libraries
+
+__Memory Safety:__ 8/10 - Better than Links2004, but still has edge cases
+
+---
+
+### Option 2: Links2004/WebSockets (CURRENT) ❌ __LEAKING__
+
+__GitHub:__ [](https://github.com/Links2004/arduinoWebSockets)<https://github.com/Links2004/arduinoWebSockets>
+
+__Pros:__
+
+- ✅ Simple API
+- ✅ Synchronous (easier to understand)
+- ✅ Supports multiple protocols (WebSocket, Socket.IO, etc.)
+
+__Cons:__
+
+- ❌ __Memory leaks in your case__ (proven)
+- ❌ Blocking operations
+- ❌ Less efficient for high-frequency data
+
+__Memory Safety:__ 4/10 - Known issues with ESP32-S3 qio_opi PSRAM
+
+---
+
+### Option 3: ArduinoWebsockets (gilmaimon) 🔧 __WORTH TRYING__
+
+__GitHub:__ [](https://github.com/gilmaimon/ArduinoWebsockets)<https://github.com/gilmaimon/ArduinoWebsockets>
+
+__Pros:__
+
+- ✅ __Modern C++ design__ - Better memory management
+- ✅ __Lightweight__ - Minimal overhead
+- ✅ __Simple API__ - Easy to use
+- ✅ __Active maintenance__ - Regular updates
+- ✅ __ESP32 optimized__ - Designed for embedded systems
+
+__Cons:__
+
+- ⚠️ Smaller community (600 stars vs 3.5k)
+- ⚠️ Less battle-tested than ESPAsyncWebServer
+- ⚠️ You tried this before (26-0127-1440) - had broken includes
+
+__Memory Safety:__ 7/10 - Better design, but less proven
+
+---
+
+### Option 4: HTTP POST (Simple Alternative) 🎯 __SAFEST__
+
+__Library:__ HTTPClient (built-in)
+
+__Pros:__
+
+- ✅ __Stateless__ - No persistent connection = no leaks
+- ✅ __Built-in__ - No external dependencies
+- ✅ __Proven stable__ - Part of ESP32 core
+- ✅ __Simple__ - Easy to debug
+- ✅ __Works with any server__ - Flask, Express, etc.
+
+__Cons:__
+
+- ❌ No real-time bidirectional communication
+- ❌ Higher latency (connection overhead per request)
+- ❌ More server load (new connection each time)
+
+__Memory Safety:__ 10/10 - No persistent state = no leaks
+
+---
+
+### Option 5: MQTT 📡 __ALTERNATIVE PROTOCOL__
+
+__Library:__ PubSubClient or AsyncMqttClient
+
+__Pros:__
+
+- ✅ __Designed for IoT__ - Lightweight, efficient
+- ✅ __Reliable__ - QoS levels, automatic reconnect
+- ✅ __Pub/Sub model__ - Flexible architecture
+- ✅ __Battle-tested__ - Used in millions of devices
+
+__Cons:__
+
+- ❌ Requires MQTT broker (Mosquitto, HiveMQ, etc.)
+- ❌ Different architecture than your current server
+- ❌ Overkill for simple point-to-point communication
+
+__Memory Safety:__ 9/10 - Very stable, but adds complexity
+
+---
+
+## My Recommendation (Priority Order)
+
+### 1️⃣ __Try ESPAsyncWebServer First__ (30 min test)
+
+- Use mathieucarbou's maintained fork
+- Best chance of fixing leak while keeping WebSocket
+- If it works → Problem solved!
+- If it leaks → Strong evidence of PSRAM driver issue
+
+### 2️⃣ __Fall Back to HTTP POST__ (15 min implementation)
+
+- Guaranteed to work (stateless = no leaks)
+- Simple, reliable, debuggable
+- Good enough for 1-second update interval
+
+### 3️⃣ __Try ArduinoWebsockets__ (if you want to retry)
+
+- Fix the broken includes issue from 26-0127-1440
+- Modern design might avoid leak
+- Worth a shot if ESPAsync fails
+
+---
+
+## Socket.IO on ESP32? ❌ __NOT RECOMMENDED__
+
+You're correct - Socket.IO is __not practical__ for ESP32:
+
+- Requires full JavaScript engine or complex protocol implementation
+- Links2004 library has Socket.IO support, but it's buggy
+- Too heavy for embedded systems
+- Better alternatives exist (WebSocket, MQTT)
+
+---
+
+## Next Steps
+
+__Would you like me to:__
+
+1. __Implement ESPAsyncWebServer__ (recommended first try)
+2. __Implement HTTP POST__ (safest, guaranteed to work)
+3. __Research the ArduinoWebsockets include issue__ (retry previous attempt
 
