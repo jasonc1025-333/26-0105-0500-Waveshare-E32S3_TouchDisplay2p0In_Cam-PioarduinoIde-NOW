@@ -76,8 +76,8 @@ const char* AUTH_TOKEN = "Jesus333!!!";
 const char* ws_host = "10.0.0.90";       // Python server IP (local network): Win:Hp-Zbook
 //// jwc 26-0124-0120 y const char* ws_host = "10.0.0.149";       // Python server IP (local network): Lin:Bmax-B1Pro
 
-const uint16_t ws_port = 5000;           // WebSocket server port
-const char* ws_path = "/websocket";      // WebSocket endpoint path
+const uint16_t ws_port = 5100;           // WebSocket server port (jwc 26-0127-0710: Changed from 5000 to 5100 for async server)
+const char* ws_path = "/";               // WebSocket endpoint path (jwc 26-0127-0710: Changed from "/websocket" to "/" for websockets library)
 
 WebSocketsClient webSocket;
 
@@ -616,12 +616,26 @@ void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, floa
 
 //// Transmit queued AprilTag data via WebSocket (called periodically)
 //// jwc 26-0124-1530 UPDATED: Send individual tag messages (not array) to match server format
+//// jwc 26-0127-0735 NEW: Added memory monitoring and transmission counter
+static int total_transmitted = 0;  // Track total messages sent
+
 void transmitAprilTags() {
   unsigned long currentTime = millis();
   
   // Check if it's time to transmit
   if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
     return;
+  }
+  
+  //// jwc 26-0127-0735 NEW: Memory monitoring (print every transmission)
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t minFreeHeap = ESP.getMinFreeHeap();
+  Serial.printf("*** [MEM] Free: %d bytes, Min: %d bytes, Total TX: %d\n", 
+                freeHeap, minFreeHeap, total_transmitted);
+  
+  //// jwc 26-0127-0735 WARNING: Low memory detection
+  if (freeHeap < 20000) {
+    Serial.printf("*** [MEM] WARNING: Low memory! Free=%d bytes\n", freeHeap);
   }
   
   // Check if WebSocket is connected
@@ -665,6 +679,9 @@ void transmitAprilTags() {
         queueCount--;
         transmitted++;
       }
+      
+      //// jwc 26-0127-0735 NEW: Increment total transmission counter
+      total_transmitted += transmitted;
       
       Serial.printf("*** Esp32 -->> SvHub: Sent %d tags to server\n", transmitted);
       lastTransmitTime = currentTime;

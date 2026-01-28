@@ -1,0 +1,53 @@
+# Pure WebSocket Server Requirements
+# Install with: pip install -r requirements.txt
+
+# ============================================================================
+# VERSION COMPATIBILITY NOTES (26-0125-0900)
+# ============================================================================
+# HISTORY:
+# 1. simple-websocket 1.0.0 (FAILED)
+#    - Werkzeug compatibility issues (requires 2.x, Flask 3.x needs 3.x)
+#    - 400 Bad Request errors, unreliable
+#
+#### jwc 26-0125-0900 ARCHIVED: flask-sock (replaced by python-socketio)
+# 2. flask-sock 0.6.0 (FAILED - FREEZE ISSUE)
+#    - Compatible with Flask 3.x, worked initially
+#    - CRITICAL BUG: ws.receive() blocks forever on incomplete messages
+#    - No timeout support, freezes at message #20-33
+#    - Not production-ready!
+#
+#### jwc 26-0127-0630 ARCHIVED: python-socketio (replaced by websockets)
+# 3. python-socketio (ATTEMPTED - TOO COMPLEX)
+#    - Industry standard, 10× more popular than flask-sock
+#    - Built-in timeout handling (solves freeze issue!)
+#    - Excellent error recovery, auto-reconnect
+#    - Production-ready, used by Fortune 500 companies
+#    - Active development (2024+)
+#    - ISSUE: No reliable Socket.IO client library for ESP32!
+#    - Would require ESP32 code changes (risky!)
+#
+# 4. websockets (CURRENT - BEST SOLUTION)
+#    - 7.5× more popular than python-socketio (15M vs 2M downloads/month)
+#    - 6.7× more GitHub usage (100K vs 15K repos)
+#    - Async-based with proper timeout handling (fixes freeze!)
+#    - Standard WebSocket protocol (RFC 6455)
+#    - NO ESP32 code changes needed! (uses existing WebSocketsClient)
+#    - Simpler than Socket.IO (no complex handshake/protocol)
+#    - Production-ready (11+ years, millions of users)
+# ============================================================================
+
+# Core dependencies - websockets async stack (jwc 26-0127-0630)
+websockets==12.0                # Async WebSocket library with proper timeout handling (fixes freeze!)
+Flask==3.0.0                    # Latest stable Flask (for HTTP endpoints)
+Flask-CORS==4.0.0               # CORS support for cross-origin requests
+
+#### jwc 26-0127-0630 ARCHIVED: python-socketio stack (replaced by websockets)
+#### Flask-SocketIO==5.3.6           # Flask integration for Socket.IO (provides flask_socketio import)
+#### python-socketio==5.11.0         # Robust WebSocket/Socket.IO implementation (auto-installed by Flask-SocketIO)
+#### python-engineio==4.9.0          # Engine.IO protocol (required by python-socketio)
+#### eventlet==0.35.2                # Async networking library (recommended for python-socketio)
+
+#### jwc 26-0125-0900 ARCHIVED: flask-sock (replaced by python-socketio)
+#### Flask==3.0.0          # Latest stable Flask (no need to downgrade!)
+#### Flask-CORS==4.0.0     # CORS support for cross-origin requests
+#### flask-sock==0.6.0     # Reliable WebSocket implementation (works with Flask 3.x!)

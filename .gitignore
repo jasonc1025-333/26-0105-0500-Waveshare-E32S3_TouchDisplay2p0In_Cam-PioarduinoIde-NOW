@@ -4,6 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 99-ARCHIVE-GOOD/
+99-ARCHIVE-BAD/
 *SNAPSHOT*
 
 # Python virtual environment
