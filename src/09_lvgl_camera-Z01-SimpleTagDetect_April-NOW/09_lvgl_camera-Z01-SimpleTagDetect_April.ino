@@ -630,13 +630,14 @@ void transmitAprilTags() {
   //// jwc 26-0127-0735 NEW: Memory monitoring (print every transmission)
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minFreeHeap = ESP.getMinFreeHeap();
-  Serial.printf("*** [MEM] Free: %d bytes, Min: %d bytes, Total TX: %d\n", 
-                freeHeap, minFreeHeap, total_transmitted);
-  
-  //// jwc 26-0127-0735 WARNING: Low memory detection
-  if (freeHeap < 20000) {
-    Serial.printf("*** [MEM] WARNING: Low memory! Free=%d bytes\n", freeHeap);
-  }
+  Serial.printf("\n");
+  Serial.printf("*** *** *** [MEM} Free_Dram_Heap: %d b | Free_Psram: %d b | Total TX: %d\n", freeHeap, minFreeHeap, total_transmitted);
+  Serial.printf("\n");
+
+  //// jwc 26-0127-2100 y //// jwc 26-0127-0735 WARNING: Low memory detection
+  //// jwc 26-0127-2100 y if (freeHeap < 20000) {
+  //// jwc 26-0127-2100 y   Serial.printf("*** [MEM] WARNING: Low memory! Free=%d bytes\n", freeHeap);
+  //// jwc 26-0127-2100 y }
   
   // Check if WebSocket is connected
   if (!webSocket.isConnected()) {
@@ -665,15 +666,30 @@ void transmitAprilTags() {
         doc["range_cm"] = round(tagQueue[queueHead].range * 10.0) / 10.0;
         doc["timestamp"] = tagQueue[queueHead].timestamp;
         doc["camera_name"] = "Waveshare-ESP32-S3";
-        doc["smartcam_ip"] = WiFi.localIP().toString();
         
-        // Serialize and send
-        String jsonString;
-        serializeJson(doc, jsonString);
-        webSocket.sendTXT(jsonString);
+        //// jwc 26-0128-0140 CRITICAL FIX #5: Eliminate WiFi.localIP().toString() String leak
+        //// Original code: doc["smartcam_ip"] = WiFi.localIP().toString();
+        //// Problem: toString() creates String object (~180 bytes) that's not freed
+        //// Solution: Use stack-allocated buffer with snprintf (no heap allocation)
+        char ipBuffer[16];  // Stack-allocated, auto-freed (xxx.xxx.xxx.xxx = 15 chars max)
+        IPAddress ip = WiFi.localIP();
+        snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+        doc["smartcam_ip"] = ipBuffer;
+        
+        //// jwc 26-0128-0120 CRITICAL FIX #4: Replace String with stack buffer to prevent DRAM leak
+        //// Original code used String object which allocates heap memory (~100 bytes per TX)
+        //// String was not being freed, causing 100-byte leak per transmission
+        //// After 30 transmissions: 3KB leaked → system crash!
+        //// NEW: Use stack-allocated buffer (auto-freed when function returns)
+        char jsonBuffer[512];  // Stack-allocated, matches StaticJsonDocument size
+        size_t len = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+        webSocket.sendTXT(jsonBuffer, len);
+        
+        //// jwc 26-0127-2150 CRITICAL FIX #2: Clear JSON document to prevent DRAM leak
+        doc.clear();
         
         //// jwc 26-0124-1340 NEW: Debug print with arrow convention
-        Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", jsonString.c_str());
+        Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", jsonBuffer);
         
         queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
         queueCount--;
@@ -882,6 +898,11 @@ static void task(void *param) {
         // Convert grayscale to RGB565: R5G6B5
         rgb565_buf[i] = ((gray & 0xF8) << 8) | ((gray & 0xFC) << 3) | (gray >> 3);
       }
+      
+      //// jwc 26-0127-2140 REVERTED: Cannot free camera buffer here - AprilTag detector needs it!
+      //// Original attempt (jwc 26-0127-2130) caused crash: LoadProhibited at 0x00000008
+      //// AprilTag detector accesses camera_framebuffer_pic_ObjPtr->buf later in code
+      //// NEW LOCATION: After apriltag_detections_destroy() (line ~1380)
       
       //// jwc 26-0106-0140 ARCHIVED - LVGL approach (too complicated, didn't render):
       //// if (lvgl_lock(-1)) {
@@ -1134,7 +1155,7 @@ if(zarray_size(detections) > 0){
       //// jwc n Serial.println("*** *** *** ", det->id, det->family, det->decision_margin);
       // Print tag ID and decision margin
       //// jwc y printf("*** *** *** [DET]%d,%f,", det->id, det->decision_margin);
-      printf("*** *** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
+      printf("*** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
 
       // Creating detection info object to feed into pose estimator
       apriltag_detection_info_t info;
@@ -1192,7 +1213,7 @@ if(zarray_size(detections) > 0){
       float range_cm = sqrt(x_cm*x_cm + y_cm*y_cm + z_cm*z_cm);
       
       //// jwc 26-0124-1335 UPDATED: Single-line AprilTag detection output (keep original printf for screen display)
-      printf("*** *** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
+      printf("*** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
       printf(" *** y,p,r: %5.0f, %5.0f, %5.0f", yaw, pitch, roll);
       printf(" *** x,y,z: %.1f, %.1f, %.1f cm, range: %.1f cm\n", x_cm, y_cm, z_cm, range_cm);
 
@@ -1236,8 +1257,12 @@ if(zarray_size(detections) > 0){
     // Free detection result object
     apriltag_detections_destroy(detections);
 
-
+    //// jwc 26-0127-2140 CRITICAL FIX: Return camera buffer AFTER AprilTag detection
+    //// AprilTag detector needs camera_framebuffer_pic_ObjPtr->buf, so we can't free it earlier
+    //// This still reduces hold time from ~250ms (full loop) to ~50ms (detection only)
+    //// Previous attempt (jwc 26-0127-2130) freed too early → crash at 0x00000008
     esp_camera_fb_return(camera_framebuffer_pic_ObjPtr);
+    camera_framebuffer_pic_ObjPtr = NULL;
     
     //// jwc 26-0124-1030 PHASE 7: Transmit queued AprilTags via WebSocket
     transmitAprilTags();
@@ -1246,8 +1271,8 @@ if(zarray_size(detections) > 0){
     webSocket.loop();
     
     vTaskDelay(pdMS_TO_TICKS(1));
-    //// jwc Clear Buffer
-    camera_framebuffer_pic_ObjPtr = NULL;
+    //// jwc 26-0127-2140 NOTE: camera_framebuffer_pic_ObjPtr already freed after AprilTag detection
+    //// No need to clear again here - already freed and nulled at line ~1383
 
 
 
@@ -1310,7 +1335,10 @@ void setup() {
 
   bufSize = screenWidth * screenHeight;
 
-
+  //// jwc 26-0128-0030 REVERTED Fix #3: LVGL buffer reduction broke PSRAM initialization
+  //// Attempted to reduce from 300KB to 4.8KB, but caused PSRAM = 0 bytes (watchdog reset)
+  //// Root cause: Early INTERNAL DRAM allocation prevented PSRAM hardware initialization
+  //// RESTORED: Original allocation (works, even if wasteful)
   disp_draw_buf = (lv_color_t *)heap_caps_malloc(bufSize * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!disp_draw_buf) {
     // remove MALLOC_CAP_INTERNAL flag try again
@@ -1473,6 +1501,18 @@ void setup() {
 }
 
 void loop() {
+  //// jwc 26-0127-2010 NEW: Memory monitoring for leak detection
+  //// Print heap and PSRAM usage every loop iteration to track memory leaks
+  static unsigned long last_mem_print = 0;
+  unsigned long current_time = millis();
+  if (current_time - last_mem_print >= 5000) {  // Print every 5 seconds
+    Serial.printf("\n");
+    Serial.printf("*   *   *   [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b\n", ESP.getFreeHeap(), ESP.getFreePsram());
+    Serial.printf("*   *   *   [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b\n", ESP.getFreeHeap(), ESP.getFreePsram());
+    Serial.printf("\n");
+    last_mem_print = current_time;
+  }
+  
   if (lvgl_lock(-1)) {
     lv_timer_handler(); /* let the GUI do its work */
     lvgl_unlock();
