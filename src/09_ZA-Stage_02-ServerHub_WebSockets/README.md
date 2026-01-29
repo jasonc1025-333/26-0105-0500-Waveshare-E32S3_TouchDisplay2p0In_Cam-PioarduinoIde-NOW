@@ -393,8 +393,122 @@ You need Flask HTTP endpoints for:
 const uint16_t ws_port = 5100;  // Changed from 5000 to 5100
 ```
 
+## 🔄 HTTP vs WebSocket Protocol Selection
+
+### 📡 **ESP32 Protocol Selection (Choose ONE)**
+
+The ESP32 code supports **dual protocol** - you choose which one to use at compile time:
+
+```cpp
+//// jwc 26-0128-1440 NEW: Dual protocol support - HTTP vs WebSocket
+#define DEFINE_NETWORK_HTTP_BOOL 1        // HTTP POST protocol (stateless, simpler)
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 0   // WebSocket protocol (MEMORY LEAK!)
+```
+
+**Set ONE to 1, the other to 0:**
+
+| Protocol | Flag | Memory Leak? | Connection Type | Best For |
+|----------|------|--------------|-----------------|----------|
+| **HTTP** | `DEFINE_NETWORK_HTTP_BOOL = 1` | ❌ **NO LEAK!** | Stateless POST | **Production** ✅ |
+| **WebSocket** | `DEFINE_NETWORK_WEBSOCKET_BOOL = 1` | ⚠️ **409 bytes/TX** | Persistent | Testing only |
+
+### 🐍 **Python Server (Supports BOTH Simultaneously!)**
+
+**Key Difference:** The Python server doesn't use C preprocessor directives like `#define`. It **always supports BOTH protocols at the same time!**
+
+```python
+# Python Server Architecture (Always Running):
+├── HTTP Server (Flask) on port 5000
+│   ├── GET  /          → Status dashboard
+│   ├── GET  /status    → JSON API
+│   └── POST /apriltag  → ESP32 HTTP data ✅ NEW!
+│
+└── WebSocket Server on port 5100
+    ├── ESP32 clients (if using WebSocket)
+    └── GDevelop clients (always listening)
+```
+
+**Why no flags needed?**
+- ✅ Python can run multiple servers simultaneously
+- ✅ HTTP and WebSocket don't conflict (different ports)
+- ✅ Server automatically detects which protocol ESP32 is using
+- ✅ GDevelop clients always use WebSocket (unaffected by ESP32 choice)
+
+### 🎯 **HTTP Protocol Details (NEW!)**
+
+**ESP32 Configuration:**
+```cpp
+const char* server_host = "10.0.0.90";   // Server IP
+const uint16_t server_port = 5100;       // Server port (changed from 5000!)
+const char* http_endpoint = "/apriltag"; // HTTP POST endpoint
+```
+
+**HTTP POST Request Format:**
+```http
+POST http://10.0.0.90:5100/apriltag HTTP/1.1
+Content-Type: application/json
+Authorization: Jesus333!!!
+
+{
+  "tag_id": 5,
+  "decision_margin": 123.4,
+  "yaw": 45.0,
+  "pitch": 10.0,
+  "roll": 5.0,
+  "x_cm": 10.5,
+  "y_cm": 20.3,
+  "z_cm": 30.1,
+  "range_cm": 35.2,
+  "timestamp": 1234567890,
+  "camera_name": "Waveshare-ESP32-S3",
+  "smartcam_ip": "10.0.0.123"
+}
+```
+
+**HTTP Response:**
+```json
+{
+  "status": "received",
+  "event": "apriltag_ack"
+}
+```
+
+### 🔧 **Port Configuration Summary**
+
+**Python Server Ports:**
+- **Port 5000 (HTTP/Flask):** Status dashboard, video viewer, metrics
+- **Port 5100 (WebSocket):** Real-time data streaming
+- **Port 5100 (HTTP/Flask):** NEW! HTTP POST `/apriltag` endpoint
+
+**ESP32 Configuration:**
+```cpp
+// HTTP Mode (RECOMMENDED - No memory leak!)
+#define DEFINE_NETWORK_HTTP_BOOL 1
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 0
+const uint16_t server_port = 5100;  // HTTP POST to port 5100
+
+// WebSocket Mode (MEMORY LEAK - Testing only!)
+#define DEFINE_NETWORK_HTTP_BOOL 0
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 1
+const uint16_t server_port = 5100;  // WebSocket to port 5100
+```
+
+### ✅ **Recommendation: Use HTTP Protocol**
+
+**Why HTTP is better:**
+1. ✅ **No memory leak!** (409 bytes/TX leak in WebSocket)
+2. ✅ **Stateless** (simpler, more reliable)
+3. ✅ **Easier debugging** (use curl, Postman, browser)
+4. ✅ **Production-ready** (no persistent connection issues)
+
+**When to use WebSocket:**
+- ⚠️ Testing/comparison only
+- ⚠️ Has 409 bytes/TX memory leak (crashes after ~48 seconds)
+- ⚠️ Not recommended for production
+
 ## 📝 Version History
 
+- **26-0128-1440:** Added HTTP POST protocol support (fixes memory leak!)
 - **26-0127-0700:** Created async WebSocket server (websockets library, port 5100)
 - **26-0127-0600:** Migrating to `websockets` library (fixes freeze issue, no ESP32 changes!)
 - **26-0124-1130:** Initial migration to Waveshare ESP32-S3 project

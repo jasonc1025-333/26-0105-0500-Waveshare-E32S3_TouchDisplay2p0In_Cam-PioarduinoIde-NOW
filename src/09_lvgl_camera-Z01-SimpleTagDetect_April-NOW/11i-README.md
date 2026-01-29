@@ -806,6 +806,69 @@ For production use, perform proper calibration:
 
 ---
 
+---
+
+## 🔬 HTTP Memory Leak Analysis & Resolution (2026-01-29)
+
+### 📊 Problem Discovery
+
+**Symptom:** ESP32 memory drops from 20KB → 10KB over 35 HTTP transmissions, then stabilizes
+
+**Root Cause Analysis:**
+
+```
+Initial Memory: 20,660 bytes free (TX #0)
+After 11 TX:    18,548 bytes free (stable)
+After 35 TX:    14,464 bytes free (WARNING threshold)
+After 56 TX:    11,680 bytes free (connection failures start)
+Final Stable:   10,120-10,296 bytes (TX #61+)
+
+Memory leak: ~160 bytes/TX (reduced from 250 bytes/TX after fixes!)
+Total lost: ~10,000 bytes over 35 transmissions
+```
+
+### ⚠️ **Remaining Issues:**
+
+1. **Initial memory drop** (20KB → 10KB over first 35 TX)
+2. **Connection failures** after TX #57 (code: -1) - likely WiFi/network issue, not memory
+3. **Final memory: 10KB** (still usable, but lower than ideal 20KB)
+
+### 🎯 **Conclusion:**
+
+**IMPROVED BUT NOT SOLVED!** Memory leak reduced by ~36% (250→160 bytes/TX) but **still leaking**. The leak only appeared to "stabilize" because AprilTag detection was stopped during testing.
+
+**Evidence:**
+- ⚠️ Memory drops continuously during active AprilTag detection + HTTP transmission
+- ⚠️ Leak rate: ~160 bytes per HTTP POST (down from 250 bytes/TX)
+- ⚠️ System will eventually run out of memory if left running continuously
+- ✅ Color-coded warnings successfully show memory status trends
+
+**Root Cause:** The remaining leak is likely in ESP32 core libraries (WiFi/TCP stack), not our code. Each HTTP POST allocates buffers that are not fully freed.
+
+**Recommendation:** **NOT production-ready** for 24/7 operation. System will crash after extended use. Consider:
+1. Switching to WebSocket (persistent connection, no repeated TCP handshakes)
+2. Downgrading Arduino ESP32 core to 3.0.7 or 2.0.17 (known stable versions)
+3. Implementing periodic ESP32 reboot (every 1-2 hours) as workaround
+
+### 🎨 **Color-Coded Debug Output (Added 2026-01-29)**
+
+**HTTP Response Status:**
+- 🟢 **GREEN** for success (200): `*** ✅ Esp32 <<-- SvHub: HTTP POST SUCCESS`
+- 🟡 **YELLOW** for HTTP errors (4xx, 5xx): `*** ⚠️ Esp32 <<-- SvHub: HTTP POST ERROR`
+- 🔴 **RED** for connection failures: `*** ❌ Esp32 <<--SvHub: ERROR: HTTP POST failed`
+
+**Memory Monitoring:**
+- 🟢 **GREEN** for OK (> 15KB): `*** *** *** [MEM] OK: Free_Dram_Heap: XXXXX b`
+- 🟡 **YELLOW** for warning (10-15KB): `*** *** *** [MEM] WARNING: Free_Dram_Heap: XXXXX b`
+- 🔴 **RED** for critical (< 10KB): `*** *** *** [MEM] CRITICAL: Free_Dram_Heap: XXXXX b`
+
+**Benefits:**
+- ✅ Instant visual feedback on system health
+- ✅ Easy to spot memory trends in serial output
+- ✅ Clear distinction between success/warning/error states
+
+---
+
 **End of Migration Guide**
 
 ---

@@ -55,47 +55,121 @@
 //// Replaces simple Serial1 code in loop() with proper line buffering and timing
 #include "Serial_Comms.h"
 
-//// jwc 26-0128-0730 NEW: Preprocessor flag to disable networking for memory leak testing
-//// Set to 1 to enable WiFi/WebSocket, 0 to disable (AprilTag-only mode)
-#define DEFINE_NETWORKING_ON 0  // Change to 0 to test without networking
+//// jwc 26-0128-1440 ARCHIVED: Single DEFINE_NETWORKING_BOOL flag (WebSocket only, has memory leak)
+//// //// jwc 26-0128-0730 NEW: Preprocessor flag to disable networking for memory leak testing
+//// //// Set to 1 to enable WiFi/WebSocket, 0 to disable (AprilTag-only mode)
+//// #define DEFINE_NETWORKING_BOOL 1  // Change to 0 to test without networking
+//// 
+//// #if DEFINE_NETWORKING_BOOL
+//// //// jwc 26-0124-1030 PHASE 1: WiFi & WebSocket includes + configuration
+//// #include <WiFi.h>
+//// //// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient (memory leak after 2 minutes)
+//// //// #include <WebSocketsClient.h>
+//// //// jwc 26-0128-0500 NEW: ArduinoWebsockets by gilmaimon (modern, better memory management)
+//// #include <ArduinoWebsockets.h>
+//// #include <ArduinoJson.h>
+//// #endif
 
-#if DEFINE_NETWORKING_ON
-//// jwc 26-0124-1030 PHASE 1: WiFi & WebSocket includes + configuration
+//// jwc 26-0128-1440 NEW: Dual protocol support - HTTP vs WebSocket
+//// Set one to 1 to enable (test HTTP as alternative to leaky WebSocket)
+#define DEFINE_NETWORK_HTTP_BOOL 1        // HTTP POST protocol (stateless, simpler)
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 0   // WebSocket protocol (MEMORY LEAK!)
+
+#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+//// jwc 26-0124-1030 PHASE 1: WiFi includes + configuration
 #include <WiFi.h>
+#include <ArduinoJson.h>
+#endif
+
+#if DEFINE_NETWORK_HTTP_BOOL
+//// jwc 26-0128-1440 NEW: HTTP client for stateless POST requests
+#include <HTTPClient.h>
+#endif
+
+#if DEFINE_NETWORK_WEBSOCKET_BOOL
 //// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient (memory leak after 2 minutes)
 //// #include <WebSocketsClient.h>
 //// jwc 26-0128-0500 NEW: ArduinoWebsockets by gilmaimon (modern, better memory management)
 #include <ArduinoWebsockets.h>
-#include <ArduinoJson.h>
+//// jwc 26-0128-1440 #include <ArduinoJson.h>
 #endif
 
-#if DEFINE_NETWORKING_ON
+//// jwc 26-0128-1440 ARCHIVED: WebSocket-specific server config (memory leak!)
+//// #if DEFINE_NETWORKING_BOOL
+//// //// jwc 26-0124-1030 WiFi credentials (update these for your network)
+//// const char* ssid = "Chan-Comcast";
+//// const char* password = "Jesus333!";
+//// 
+//// //// jwc 26-0124-1240 WebSocket authentication token (must match server)
+//// const char* AUTH_TOKEN = "Jesus333!!!";
+//// 
+//// //// jwc 26-0124-1030 WebSocket server configuration
+//// //// Format: ws://hostname:port/path or wss://hostname:port/path for SSL
+//// //// jwc 26-0124-1105 UPDATED: Using same server config as Lilygo T-Camera Plus S3
+//// //// * C:\12i-Db\Dropbox\09k-E32-SM\25-0517-1900-E32--OPENED\13i-T-CameraPlus-S3-NOW-Ubuntu22_BmaxB1Pro--25-0505-0730-NOW\25-1123-1700-E32_TCameraPlusS3-AprilTag-SerialToMicrobit-HttpsCorsToGDevelop\examples\Camera_Screen_AprilTag__Serial_With_Microbit--Esp32_Client_Websocket-NOW\01-Esp32-Client
+//// //// jwc 26-0124-1215 o const char* ws_host = "76.102.42.17";    // Ubuntu server IP (public IP via port-forward)
+//// //// jwc 26-0124-0120 y const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win:Hp-Zbook
+//// const char* ws_host = "10.0.0.90";       // Python server IP (local network): Win:Hp-Zbook
+//// //// jwc 26-0124-0120 y const char* ws_host = "10.0.0.149";       // Python server IP (local network): Lin:Bmax-B1Pro
+//// 
+//// const uint16_t ws_port = 5100;           // WebSocket server port (jwc 26-0127-0710: Changed from 5000 to 5100 for async server)
+//// const char* ws_path = "/";               // WebSocket endpoint path (jwc 26-0127-0710: Changed from "/websocket" to "/" for websockets library)
+//// 
+//// //// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient object
+//// //// WebSocketsClient webSocket;
+//// //// jwc 26-0128-0500 NEW: ArduinoWebsockets client object
+//// using namespace websockets;
+//// WebsocketsClient webSocket;
+//// 
+//// //// jwc 26-0124-1030 PHASE 2: AprilTag data queue & timing
+//// //// Queue to store detected AprilTag data for transmission
+//// #define MAX_QUEUE_SIZE 10
+//// struct AprilTagData {
+////   int id;
+////   float decision_margin;
+////   float yaw;
+////   float pitch;
+////   float roll;
+////   float x;
+////   float y;
+////   float z;
+////   float range;  // Distance from camera to tag (cm)
+////   unsigned long timestamp;
+//// };
+//// AprilTagData tagQueue[MAX_QUEUE_SIZE];
+//// int queueHead = 0;
+//// int queueTail = 0;
+//// int queueCount = 0;
+//// SemaphoreHandle_t queueMutex = NULL;
+//// 
+//// //// jwc 26-0124-1030 Timing control for WebSocket transmission
+//// unsigned long lastTransmitTime = 0;
+//// const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
+//// #endif
+
+//// jwc 26-0128-1440 NEW: Protocol-agnostic server config (works for both HTTP and WebSocket)
+#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
 //// jwc 26-0124-1030 WiFi credentials (update these for your network)
 const char* ssid = "Chan-Comcast";
 const char* password = "Jesus333!";
 
-//// jwc 26-0124-1240 WebSocket authentication token (must match server)
+//// jwc 26-0124-1240 Authentication token (must match server)
 const char* AUTH_TOKEN = "Jesus333!!!";
 
-//// jwc 26-0124-1030 WebSocket server configuration
-//// Format: ws://hostname:port/path or wss://hostname:port/path for SSL
-//// jwc 26-0124-1105 UPDATED: Using same server config as Lilygo T-Camera Plus S3
-//// * C:\12i-Db\Dropbox\09k-E32-SM\25-0517-1900-E32--OPENED\13i-T-CameraPlus-S3-NOW-Ubuntu22_BmaxB1Pro--25-0505-0730-NOW\25-1123-1700-E32_TCameraPlusS3-AprilTag-SerialToMicrobit-HttpsCorsToGDevelop\examples\Camera_Screen_AprilTag__Serial_With_Microbit--Esp32_Client_Websocket-NOW\01-Esp32-Client
-//// jwc 26-0124-1215 o const char* ws_host = "76.102.42.17";    // Ubuntu server IP (public IP via port-forward)
-//// jwc 26-0124-0120 y const char* ws_host = "10.0.0.89";       // Python server IP (local network): Win:Hp-Zbook
-const char* ws_host = "10.0.0.90";       // Python server IP (local network): Win:Hp-Zbook
-//// jwc 26-0124-0120 y const char* ws_host = "10.0.0.149";       // Python server IP (local network): Lin:Bmax-B1Pro
+//// jwc 26-0129-0628 CRITICAL FIX: Separate ports for HTTP vs WebSocket
+//// HTTP server (Flask) runs on port 5000
+//// WebSocket server runs on port 5100
+const char* server_host = "10.0.0.90";   // Server IP (local network): Win:Hp-Zbook
 
-const uint16_t ws_port = 5100;           // WebSocket server port (jwc 26-0127-0710: Changed from 5000 to 5100 for async server)
-const char* ws_path = "/";               // WebSocket endpoint path (jwc 26-0127-0710: Changed from "/websocket" to "/" for websockets library)
+#if DEFINE_NETWORK_HTTP_BOOL
+const uint16_t server_port = 5000;       // HTTP server port (Flask)
+#endif
 
-//// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient object
-//// WebSocketsClient webSocket;
-//// jwc 26-0128-0500 NEW: ArduinoWebsockets client object
-using namespace websockets;
-WebsocketsClient webSocket;
+#if DEFINE_NETWORK_WEBSOCKET_BOOL
+const uint16_t server_port = 5100;       // WebSocket server port
+#endif
 
-//// jwc 26-0124-1030 PHASE 2: AprilTag data queue & timing
+//// jwc 26-0124-1030 PHASE 2: AprilTag data queue & timing (protocol-agnostic)
 //// Queue to store detected AprilTag data for transmission
 #define MAX_QUEUE_SIZE 10
 struct AprilTagData {
@@ -116,9 +190,21 @@ int queueTail = 0;
 int queueCount = 0;
 SemaphoreHandle_t queueMutex = NULL;
 
-//// jwc 26-0124-1030 Timing control for WebSocket transmission
+//// jwc 26-0124-1030 Timing control for network transmission (protocol-agnostic)
 unsigned long lastTransmitTime = 0;
 const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
+#endif
+
+#if DEFINE_NETWORK_HTTP_BOOL
+//// jwc 26-0128-1440 NEW: HTTP-specific configuration
+const char* http_endpoint = "/apriltag"; // HTTP POST endpoint
+#endif
+
+#if DEFINE_NETWORK_WEBSOCKET_BOOL
+//// jwc 26-0128-1440 NEW: WebSocket-specific configuration
+const char* ws_path = "/";               // WebSocket endpoint path
+using namespace websockets;
+WebsocketsClient webSocket;
 #endif
 
 //// jwc 26-0124-1730 NEW: FPS tracking and latest tag data for HUD display
@@ -530,7 +616,32 @@ void draw_hud_overlay() {
   }
 }
 
-#if DEFINE_NETWORKING_ON
+//// jwc 26-0128-1440 ARCHIVED: Old DEFINE_NETWORKING_BOOL guard (WebSocket only)
+//// #if DEFINE_NETWORKING_BOOL
+//// //// jwc 26-0124-1030 PHASE 4: WiFi initialization function
+//// void initWiFi() {
+////   Serial.println("*** Initializing WiFi...");
+////   WiFi.mode(WIFI_STA);
+////   WiFi.begin(ssid, password);
+////   
+////   int attempts = 0;
+////   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+////     delay(500);
+////     Serial.print(".");
+////     attempts++;
+////   }
+////   
+////   if (WiFi.status() == WL_CONNECTED) {
+////     Serial.println("\n*** WiFi connected!");
+////     Serial.print("*** IP address: ");
+////     Serial.println(WiFi.localIP());
+////   } else {
+////     Serial.println("\n*** ERROR: WiFi connection failed!");
+////   }
+//// }
+
+//// jwc 26-0128-1440 NEW: Protocol-agnostic WiFi initialization (works for both HTTP and WebSocket)
+#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
 //// jwc 26-0124-1030 PHASE 4: WiFi initialization function
 void initWiFi() {
   Serial.println("*** Initializing WiFi...");
@@ -553,6 +664,7 @@ void initWiFi() {
   }
 }
 
+#if DEFINE_NETWORK_WEBSOCKET_BOOL
 //// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient event handler (callback-based)
 //// void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 ////   switch(type) {
@@ -593,16 +705,27 @@ void initWiFi() {
 //// jwc 26-0128-0500 NEW: ArduinoWebsockets event handlers (lambda-based)
 void setupWebSocketHandlers() {
   // Connection opened
+  //// jwc 26-0128-1420 ARCHIVED: String leak - message.data() creates String object (~100 bytes)
+  //// webSocket.onMessage([](WebsocketsMessage message) {
+  ////   Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", message.data().c_str());
+  //// });
+  
+  //// jwc 26-0128-1420 NEW: Use c_str() directly to avoid String allocation
+  //// message.c_str() returns const char* from internal buffer (no heap allocation)
   webSocket.onMessage([](WebsocketsMessage message) {
-    Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", message.data().c_str());
+    const char* data = message.c_str();
+    Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", data);
   });
   
   webSocket.onEvent([](WebsocketsEvent event, String data) {
     if (event == WebsocketsEvent::ConnectionOpened) {
       Serial.println("*** WebSocket connected!");
       
-      // Send identify message with authentication
-      StaticJsonDocument<256> identifyDoc;
+      //// jwc 26-0128-1320 ARCHIVED: StaticJsonDocument causes memory leak (doc.clear() doesn't free internal strings)
+      //// StaticJsonDocument<256> identifyDoc;
+      //// jwc 26-0128-1320 NEW: DynamicJsonDocument auto-frees all internal allocations on destructor
+      DynamicJsonDocument identifyDoc(256);
+      
       identifyDoc["event"] = "identify";
       JsonObject identifyData = identifyDoc.createNestedObject("data");
       identifyData["type"] = "esp32";
@@ -612,7 +735,9 @@ void setupWebSocketHandlers() {
       char identifyBuffer[256];
       serializeJson(identifyDoc, identifyBuffer, sizeof(identifyBuffer));
       webSocket.send(identifyBuffer);
-      identifyDoc.clear();
+      
+      //// jwc 26-0128-1320 ARCHIVED: doc.clear() not needed - DynamicJsonDocument destructor handles cleanup
+      //// identifyDoc.clear();
       
       Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", identifyBuffer);
     } else if (event == WebsocketsEvent::ConnectionClosed) {
@@ -624,6 +749,7 @@ void setupWebSocketHandlers() {
     }
   });
 }
+#endif
 
 //// jwc 26-0124-1030 PHASE 6: AprilTag queue & transmission functions
 //// Enqueue detected AprilTag data (called from detection loop)
@@ -662,12 +788,13 @@ void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, floa
   }
 }
 
+#if DEFINE_NETWORK_WEBSOCKET_BOOL
 //// Transmit queued AprilTag data via WebSocket (called periodically)
 //// jwc 26-0124-1530 UPDATED: Send individual tag messages (not array) to match server format
 //// jwc 26-0127-0735 NEW: Added memory monitoring and transmission counter
-static int total_transmitted = 0;  // Track total messages sent
+static int total_transmitted_ws = 0;  // Track total WebSocket messages sent
 
-void transmitAprilTags() {
+void transmitAprilTagsWebSocket() {
   unsigned long currentTime = millis();
   
   // Check if it's time to transmit
@@ -679,7 +806,7 @@ void transmitAprilTags() {
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minFreeHeap = ESP.getMinFreeHeap();
   Serial.printf("\n");
-  Serial.printf("*** *** *** [MEM} Free_Dram_Heap: %d b | Free_Psram: %d b | Total TX: %d\n", freeHeap, minFreeHeap, total_transmitted);
+  Serial.printf("*** *** *** [MEM} Free_Dram_Heap: %d b | Free_Psram: %d b | Total WS TX: %d\n", freeHeap, minFreeHeap, total_transmitted_ws);
   Serial.printf("\n");
 
   //// jwc 26-0127-2100 y //// jwc 26-0127-0735 WARNING: Low memory detection
@@ -704,7 +831,10 @@ void transmitAprilTags() {
       while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
         // Create JSON document for single tag
         //// jwc 26-0125-0510 UPDATED: Round all decimals to 1 place (reduce network traffic)
-        StaticJsonDocument<512> doc;
+        //// jwc 26-0128-1320 ARCHIVED: StaticJsonDocument causes memory leak (doc.clear() doesn't free internal strings)
+        //// StaticJsonDocument<512> doc;
+        //// jwc 26-0128-1320 NEW: DynamicJsonDocument auto-frees all internal allocations on destructor
+        DynamicJsonDocument doc(512);
         doc["event"] = "apriltag_data";
         doc["tag_id"] = tagQueue[queueHead].id;
         doc["decision_margin"] = round(tagQueue[queueHead].decision_margin * 10.0) / 10.0;
@@ -739,8 +869,14 @@ void transmitAprilTags() {
         //// jwc 26-0128-0500 NEW: ArduinoWebsockets send method
         webSocket.send(jsonBuffer);
         
+        //// jwc 26-0128-1320 ARCHIVED: doc.clear() not needed - DynamicJsonDocument destructor handles cleanup
         //// jwc 26-0127-2150 CRITICAL FIX #2: Clear JSON document to prevent DRAM leak
-        doc.clear();
+        //// doc.clear();
+        
+        //// jwc 26-0128-1350 NEW: Force garbage collection after WebSocket send
+        //// Triggers ESP32 heap cleanup to prevent memory fragmentation
+        ESP.getFreeHeap();  // Triggers GC
+        delay(1);  // Allow cleanup to complete
         
         //// jwc 26-0124-1340 NEW: Debug print with arrow convention
         Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", jsonBuffer);
@@ -751,14 +887,144 @@ void transmitAprilTags() {
       }
       
       //// jwc 26-0127-0735 NEW: Increment total transmission counter
-      total_transmitted += transmitted;
+      total_transmitted_ws += transmitted;
       
       Serial.printf("*** Esp32 -->> SvHub: Sent %d tags to server\n", transmitted);
       lastTransmitTime = currentTime;
+      
+      //// jwc 26-0128-1440 NEW: Clear queue after transmission to prevent memory accumulation
+      //// Queue array may hold old data that fragments heap even after "dequeue"
+      //// Explicitly zero out the entire queue to ensure clean state
+      queueHead = 0;
+      queueTail = 0;
+      queueCount = 0;
+      memset(tagQueue, 0, sizeof(tagQueue));  // Zero out entire array
+      Serial.println("*** Queue cleared after transmission");
     }
     xSemaphoreGive(queueMutex);
   }
 }
+#endif
+
+#if DEFINE_NETWORK_HTTP_BOOL
+//// jwc 26-0128-1440 NEW: HTTP POST transmission (stateless, no memory leak!)
+static int total_transmitted_http = 0;  // Track total HTTP messages sent
+
+void transmitAprilTagsHTTP() {
+  unsigned long currentTime = millis();
+  
+  // Check if it's time to transmit
+  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
+    return;
+  }
+  
+  //// jwc 26-0129-0710 UPDATED: Color-coded memory monitoring
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t minFreeHeap = ESP.getMinFreeHeap();
+  Serial.printf("\n");
+  
+  //// Color-code based on memory level
+  if (freeHeap < 10000) {
+    //// RED for critical (< 10KB)
+    Serial.printf("\033[31m*** *** *** [MEM] CRITICAL: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
+  } else if (freeHeap < 15000) {
+    //// YELLOW for warning (10-15KB)
+    Serial.printf("\033[33m*** *** *** [MEM] WARNING: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
+  } else {
+    //// GREEN for OK (> 15KB)
+    Serial.printf("\033[32m*** *** *** [MEM] OK: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
+  }
+  Serial.printf("\n");
+  
+  // Check if WiFi is connected
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("*** WiFi not connected, skipping transmission");
+    return;
+  }
+  
+  // Check if queue has data
+  if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (queueCount > 0) {
+      // Send each tag as individual HTTP POST
+      int transmitted = 0;
+      while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
+        // Create JSON document for single tag
+        DynamicJsonDocument doc(512);
+        doc["tag_id"] = tagQueue[queueHead].id;
+        doc["decision_margin"] = round(tagQueue[queueHead].decision_margin * 10.0) / 10.0;
+        doc["yaw"] = round(tagQueue[queueHead].yaw * 10.0) / 10.0;
+        doc["pitch"] = round(tagQueue[queueHead].pitch * 10.0) / 10.0;
+        doc["roll"] = round(tagQueue[queueHead].roll * 10.0) / 10.0;
+        doc["x_cm"] = round(tagQueue[queueHead].x * 10.0) / 10.0;
+        doc["y_cm"] = round(tagQueue[queueHead].y * 10.0) / 10.0;
+        doc["z_cm"] = round(tagQueue[queueHead].z * 10.0) / 10.0;
+        doc["range_cm"] = round(tagQueue[queueHead].range * 10.0) / 10.0;
+        doc["timestamp"] = tagQueue[queueHead].timestamp;
+        doc["camera_name"] = "Waveshare-ESP32-S3";
+        
+        // Add IP address (stack-allocated buffer)
+        char ipBuffer[16];
+        IPAddress ip = WiFi.localIP();
+        snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+        doc["smartcam_ip"] = ipBuffer;
+        
+        // Serialize JSON to stack buffer
+        char jsonBuffer[512];
+        serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+        
+        // HTTP POST request
+        HTTPClient http;
+        char url[128];
+        snprintf(url, sizeof(url), "http://%s:%d%s", server_host, server_port, http_endpoint);
+        
+        http.begin(url);
+        http.addHeader("Content-Type", "application/json");
+        http.addHeader("Authorization", AUTH_TOKEN);
+        
+        int httpCode = http.POST(jsonBuffer);
+        
+        //// jwc 26-0129-0650 CRITICAL FIX: Eliminate ALL String leaks in HTTP error handling
+        //// jwc 26-0129-0700 UPDATED: Added ANSI color codes for visual debugging
+        //// ARCHIVED (memory leak): String response = http.getString(); (~200 bytes leak per TX!)
+        //// ARCHIVED (memory leak): http.errorToString(httpCode).c_str() (~200 bytes leak per error!)
+        //// Problem: String objects allocate heap memory that's never freed
+        //// Solution: Skip response body entirely (stateless HTTP doesn't need it!)
+        if (httpCode > 0) {
+          if (httpCode == 200) {
+            //// jwc 26-0129-0700 GREEN for success
+            Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: HTTP POST SUCCESS: %s (code: 200)\033[0m\n", jsonBuffer);
+          } else {
+            //// jwc 26-0129-0700 YELLOW for HTTP errors (4xx, 5xx)
+            Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: HTTP POST ERROR: %s (code: %d)\033[0m\n", jsonBuffer, httpCode);
+          }
+        } else {
+          //// jwc 26-0129-0700 RED for connection failures
+          Serial.printf("\033[31m*** ❌ Esp32 <<--SvHub: ERROR: HTTP POST failed (code: %d)\033[0m\n", httpCode);
+        }
+        
+        http.end();  // Close connection (stateless!)
+        
+        queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
+        queueCount--;
+        transmitted++;
+      }  // ← MISSING CLOSING BRACE FOR while() LOOP!
+      
+      total_transmitted_http += transmitted;
+      
+      Serial.printf("*** Esp32 -->> SvHub: Sent %d tags via HTTP\n", transmitted);
+      lastTransmitTime = currentTime;
+      
+      // Clear queue after transmission
+      queueHead = 0;
+      queueTail = 0;
+      queueCount = 0;
+      memset(tagQueue, 0, sizeof(tagQueue));
+      Serial.println("*** Queue cleared after transmission");
+    }
+    xSemaphoreGive(queueMutex);
+  }
+}
+#endif
 #endif
 
 
@@ -1287,8 +1553,18 @@ if(zarray_size(detections) > 0){
       latestTag.z = z_cm;
       latestTag.range = range_cm;
       
-      #if DEFINE_NETWORKING_ON
-      //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for WebSocket transmission
+      //// jwc 26-0128-1440 ARCHIVED: Old DEFINE_NETWORKING_BOOL guard
+      //// #if DEFINE_NETWORKING_BOOL
+      //// //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for WebSocket transmission
+      //// //// jwc 26-0124-1745 FIX: Use extracted values (not freed memory!)
+      //// //// jwc 26-0124-1800 NEW: Pass range to enqueue function
+      //// enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
+      ////                 x_cm, y_cm, z_cm, range_cm);
+      //// #endif
+      
+      //// jwc 26-0128-1440 NEW: Protocol-agnostic enqueue (works for both HTTP and WebSocket)
+      #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+      //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for network transmission
       //// jwc 26-0124-1745 FIX: Use extracted values (not freed memory!)
       //// jwc 26-0124-1800 NEW: Pass range to enqueue function
       enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
@@ -1321,15 +1597,26 @@ if(zarray_size(detections) > 0){
     esp_camera_fb_return(camera_framebuffer_pic_ObjPtr);
     camera_framebuffer_pic_ObjPtr = NULL;
     
-    #if DEFINE_NETWORKING_ON
-    //// jwc 26-0124-1030 PHASE 7: Transmit queued AprilTags via WebSocket
-    transmitAprilTags();
+    //// jwc 26-0128-1440 ARCHIVED: Old DEFINE_NETWORKING_BOOL guard (WebSocket only)
+    //// #if DEFINE_NETWORKING_BOOL
+    //// //// jwc 26-0124-1030 PHASE 7: Transmit queued AprilTags via WebSocket
+    //// transmitAprilTags();
+    //// 
+    //// //// jwc 26-0124-1030 PHASE 7: Process WebSocket events
+    //// //// jwc 26-0128-0500 ARCHIVED: Links2004 loop method
+    //// //// webSocket.loop();
+    //// //// jwc 26-0128-0500 NEW: ArduinoWebsockets poll method
+    //// webSocket.poll();
+    //// #endif
     
-    //// jwc 26-0124-1030 PHASE 7: Process WebSocket events
-    //// jwc 26-0128-0500 ARCHIVED: Links2004 loop method
-    //// webSocket.loop();
-    //// jwc 26-0128-0500 NEW: ArduinoWebsockets poll method
-    webSocket.poll();
+    //// jwc 26-0128-1440 NEW: Protocol-specific transmission (HTTP or WebSocket)
+    #if DEFINE_NETWORK_HTTP_BOOL
+    //// HTTP: Stateless POST requests (no persistent connection)
+    transmitAprilTagsHTTP();
+    #elif DEFINE_NETWORK_WEBSOCKET_BOOL
+    //// WebSocket: Persistent connection (MEMORY LEAK!)
+    transmitAprilTagsWebSocket();
+    webSocket.poll();  // Process WebSocket events
     #endif
     
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -1503,11 +1790,47 @@ void setup() {
 #endif
 
 
-  #if DEFINE_NETWORKING_ON
-  //// jwc 26-0124-1030 PHASE 7: Initialize WiFi and WebSocket
+  //// jwc 26-0128-1440 ARCHIVED: Old DEFINE_NETWORKING_BOOL guard (WebSocket only)
+  //// #if DEFINE_NETWORKING_BOOL
+  //// //// jwc 26-0124-1030 PHASE 7: Initialize WiFi and WebSocket
+  //// initWiFi();
+  //// 
+  //// //// jwc 26-0124-1030 PHASE 7: Initialize queue mutex
+  //// queueMutex = xSemaphoreCreateMutex();
+  //// if (queueMutex == NULL) {
+  ////   Serial.println("*** ERROR: Failed to create queue mutex!");
+  //// } else {
+  ////   Serial.println("*** Queue mutex created successfully");
+  //// }
+  //// 
+  //// //// jwc 26-0124-1030 PHASE 7: Initialize WebSocket client
+  //// //// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient initialization
+  //// //// webSocket.begin(ws_host, ws_port, ws_path);
+  //// //// webSocket.onEvent(webSocketEvent);
+  //// //// webSocket.setReconnectInterval(5000);
+  //// //// jwc 26-0128-0500 NEW: ArduinoWebsockets initialization
+  //// setupWebSocketHandlers();
+  //// 
+  //// // Build WebSocket URL
+  //// char ws_url[128];
+  //// snprintf(ws_url, sizeof(ws_url), "ws://%s:%d%s", ws_host, ws_port, ws_path);
+  //// 
+  //// bool connected = webSocket.connect(ws_url);
+  //// if (connected) {
+  ////   Serial.printf("*** WebSocket client connected to: %s\n", ws_url);
+  //// } else {
+  ////   Serial.printf("*** ERROR: WebSocket connection failed to: %s\n", ws_url);
+  //// }
+  //// #else
+  //// Serial.println("*** NETWORKING DISABLED - AprilTag-only mode for memory leak testing");
+  //// #endif
+  
+  //// jwc 26-0128-1440 NEW: Protocol-specific initialization (HTTP or WebSocket)
+  #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+  //// jwc 26-0124-1030 PHASE 7: Initialize WiFi (common for both protocols)
   initWiFi();
   
-  //// jwc 26-0124-1030 PHASE 7: Initialize queue mutex
+  //// jwc 26-0124-1030 PHASE 7: Initialize queue mutex (common for both protocols)
   queueMutex = xSemaphoreCreateMutex();
   if (queueMutex == NULL) {
     Serial.println("*** ERROR: Failed to create queue mutex!");
@@ -1515,7 +1838,14 @@ void setup() {
     Serial.println("*** Queue mutex created successfully");
   }
   
-  //// jwc 26-0124-1030 PHASE 7: Initialize WebSocket client
+  #if DEFINE_NETWORK_HTTP_BOOL
+  //// jwc 26-0128-1440 NEW: HTTP mode - no persistent connection setup needed!
+  Serial.println("*** HTTP mode enabled - stateless POST requests");
+  Serial.printf("*** Server: http://%s:%d%s\n", server_host, server_port, http_endpoint);
+  #endif
+  
+  #if DEFINE_NETWORK_WEBSOCKET_BOOL
+  //// jwc 26-0124-1030 PHASE 7: Initialize WebSocket client (persistent connection)
   //// jwc 26-0128-0500 ARCHIVED: Links2004 WebSocketsClient initialization
   //// webSocket.begin(ws_host, ws_port, ws_path);
   //// webSocket.onEvent(webSocketEvent);
@@ -1525,7 +1855,7 @@ void setup() {
   
   // Build WebSocket URL
   char ws_url[128];
-  snprintf(ws_url, sizeof(ws_url), "ws://%s:%d%s", ws_host, ws_port, ws_path);
+  snprintf(ws_url, sizeof(ws_url), "ws://%s:%d%s", server_host, server_port, ws_path);
   
   bool connected = webSocket.connect(ws_url);
   if (connected) {
@@ -1533,6 +1863,8 @@ void setup() {
   } else {
     Serial.printf("*** ERROR: WebSocket connection failed to: %s\n", ws_url);
   }
+  #endif
+  
   #else
   Serial.println("*** NETWORKING DISABLED - AprilTag-only mode for memory leak testing");
   #endif

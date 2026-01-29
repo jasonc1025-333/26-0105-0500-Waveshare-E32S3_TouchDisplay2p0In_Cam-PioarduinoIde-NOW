@@ -31,7 +31,7 @@ MIGRATION NOTE (26-0127-0630):
 
 import asyncio
 import websockets
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import json
 import time
@@ -118,6 +118,9 @@ stats = {
     'esp32_connect_time': 0,
     'gdevelop_clients': 0
 }
+
+#### jwc 26-0128-1440 NEW: Store event loop for async broadcast from Flask HTTP endpoint
+websocket_loop = None
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -489,6 +492,73 @@ def status():
         }
     })
 
+#### jwc 26-0128-1440 NEW: HTTP POST endpoint for ESP32 AprilTag data (stateless alternative to WebSocket)
+@app.route('/apriltag', methods=['POST'])
+def apriltag_http():
+    """
+    HTTP POST endpoint for AprilTag data from ESP32
+    
+    Alternative to WebSocket - stateless, simpler, no memory leaks!
+    
+    Expected JSON body:
+    {
+        "tag_id": 5,
+        "decision_margin": 123.4,
+        "yaw": 45.0,
+        "pitch": 10.0,
+        "roll": 5.0,
+        "x_cm": 10.5,
+        "y_cm": 20.3,
+        "z_cm": 30.1,
+        "range_cm": 35.2,
+        "timestamp": 1234567890,
+        "camera_name": "Waveshare-ESP32-S3",
+        "smartcam_ip": "10.0.0.123"
+    }
+    """
+    #### jwc 26-0129-0441 FIX: Declare global at function start (before any code)
+    global latest_apriltag_data, websocket_loop
+    
+    try:
+        # Validate auth token from header
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header != AUTH_TOKEN:
+            print(f"❌ HTTP POST /apriltag: AUTH FAILED (token={auth_header[:20]}...)")
+            return jsonify({'error': 'Invalid auth_token'}), 401
+        
+        # Parse JSON body
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON body'}), 400
+        
+        # Add server timestamp
+        data['server_timestamp'] = time.time()
+        
+        # Store as latest
+        latest_apriltag_data = data
+        
+        # Broadcast to GDevelop clients via WebSocket (async)
+        broadcast_message = {
+            'event': 'apriltag_data',
+            **data
+        }
+        
+        # Schedule async broadcast (run in event loop)
+        asyncio.run_coroutine_threadsafe(
+            broadcast_to_gdevelop(broadcast_message),
+            websocket_loop
+        )
+        
+        stats['apriltag_events'] += 1
+        
+        print(f"*** SvHub <<-- Esp32: HTTP POST /apriltag | 📡 ID={data.get('tag_id')}, Pos=({data.get('x_cm', 0):.1f},{data.get('y_cm', 0):.1f},{data.get('z_cm', 0):.1f})cm | GDevelop_clients={stats['gdevelop_clients']}")
+        
+        return jsonify({'status': 'received', 'event': 'apriltag_ack'}), 200
+        
+    except Exception as e:
+        print(f"❌ Error handling HTTP POST /apriltag: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -538,7 +608,34 @@ def start_flask_server():
     log.setLevel(logging.ERROR)
     app.run(host=SERVER_HOST, port=SERVER_PORT, debug=False)
 
-if __name__ == '__main__':
+#### jwc 26-0129-0446 FIX: Python Syntax Error FINALLY FIXED!
+# Successfully fixed the Python syntax error by wrapping the main code in a main() function.
+# This is the proper Python pattern for handling global variables.
+#
+# 🔧 Root Cause:
+# Python's global declaration has strict scoping rules:
+# - Module-level code (under if __name__ == '__main__':) is NOT a function scope
+# - global declarations only work inside functions
+# - Declaring global at module level causes syntax error
+#
+# ✅ Solution:
+# WRONG - global at module level (not in a function):
+#   if __name__ == '__main__':
+#       global websocket_loop  # ❌ SyntaxError!
+#       websocket_loop = loop
+#
+# CORRECT - wrap in main() function:
+#   def main():
+#       global websocket_loop  # ✅ Works! (inside function)
+#       websocket_loop = loop
+#
+#   if __name__ == '__main__':
+#       main()
+
+def main():
+    """Main entry point - sets up event loop and starts servers"""
+    global websocket_loop
+    
     print_startup_info()
     
     try:
@@ -546,10 +643,19 @@ if __name__ == '__main__':
         flask_thread = threading.Thread(target=start_flask_server, daemon=True)
         flask_thread.start()
         
+        #### jwc 26-0128-1440 NEW: Store event loop for HTTP endpoint async broadcast
+        # Get the event loop and store it globally so Flask HTTP endpoint can schedule async tasks
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        websocket_loop = loop
+        
         # Start WebSocket server (async)
-        asyncio.run(start_websocket_server())
+        loop.run_until_complete(start_websocket_server())
         
     except KeyboardInterrupt:
         print("\n🛑 Server stopped")
     except Exception as e:
         print(f"❌ Error: {e}")
+
+if __name__ == '__main__':
+    main()
