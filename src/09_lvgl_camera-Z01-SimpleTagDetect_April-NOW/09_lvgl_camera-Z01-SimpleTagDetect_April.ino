@@ -207,6 +207,16 @@ using namespace websockets;
 WebsocketsClient webSocket;
 #endif
 
+//// jwc 26-0129-0940 CRITICAL FIX: Forward declare total_transmitted_http BEFORE all functions
+//// Compiler error: "not declared in this scope" when draw_hud_overlay() tries to access it
+//// Root cause: Variable declared AFTER draw_hud_overlay() function (line order issue!)
+//// Solution: Declare at file scope BEFORE any functions that use it
+#if DEFINE_NETWORK_HTTP_BOOL
+int total_transmitted_http = 0;  // HTTP enabled: real counter
+#else
+int total_transmitted_http = 0;  // HTTP disabled: dummy variable
+#endif
+
 //// jwc 26-0124-1730 NEW: FPS tracking and latest tag data for HUD display
 unsigned long lastFrameTime = 0;
 unsigned long frameCount = 0;
@@ -554,26 +564,53 @@ void draw_comm_button() {
 //// jwc 26-0124-2230 UPDATED: Added heap memory display under FPS
 //// jwc 26-0125-0000 UPDATED: Yellow for rows 2+, font size 2 (1 pixel bigger)
 //// jwc 26-0125-0330 UPDATED: Moved tag data from upper-right to lower-left, improved spacing
+//// jwc 26-0129-0820 UPDATED: Show memory in bytes, TX#, and MemLeak per transmission
+//// jwc 26-0129-0945 UPDATED: Increased font size from 1 to 2 for better readability
 void draw_hud_overlay() {
-  gfx->setTextSize(2);  // Bigger font for HUD (was 1, now 2)
+  gfx->setTextSize(2);  // Bigger font for better readability (was 1, now 2)
   
   //// Draw FPS in top-left corner (semi-transparent background)
-  gfx->fillRect(0, 0, 100, 30, 0x0000);  // Black background (wider/taller for bigger font)
+  gfx->fillRect(0, 0, 120, 80, 0x0000);  // Black background (taller for 4 lines at font size 2)
   gfx->setTextColor(GREEN);
   gfx->setCursor(2, 2);
   gfx->printf("FPS:%.1f", currentFPS);
   
-  //// Draw heap memory under FPS
-  gfx->setCursor(2, 17);  // Adjusted for bigger font
+  //// Draw heap memory in bytes (line 2)
+  gfx->setCursor(2, 22);  // Font size 2: 16px height + 4px spacing = 20px per line
   uint32_t freeHeap = ESP.getFreeHeap();
   if (freeHeap < 10000) {
     gfx->setTextColor(RED);  // Red if low memory
-  } else if (freeHeap < 50000) {
+  } else if (freeHeap < 15000) {
     gfx->setTextColor(YELLOW);  // Yellow if medium
   } else {
     gfx->setTextColor(GREEN);  // Green if plenty
   }
-  gfx->printf("Mem:%dK", freeHeap / 1024);
+  gfx->printf("Mem:%db", freeHeap);
+  
+  //// Draw TX# and MemLeak (line 3 and 4)
+  gfx->setCursor(2, 42);  // Line 3: 2 + 20 + 20 = 42px
+  #if DEFINE_NETWORK_HTTP_BOOL
+  //// jwc 26-0129-0900 CRITICAL FIX: Move extern declaration outside function (global scope)
+  //// Linker error: "undefined reference to total_transmitted_http" when extern inside function
+  //// Solution: Declare at file scope (before draw_hud_overlay function)
+  //// extern int total_transmitted_http;  // MOVED to line ~850 (after #if DEFINE_NETWORK_HTTP_BOOL)
+  static uint32_t lastHeap = 20536;  // Initial baseline
+  int memLeak = (int)lastHeap - (int)freeHeap;
+  if (total_transmitted_http > 0) {
+    memLeak = memLeak / total_transmitted_http;  // Average leak per TX
+  }
+  gfx->setTextColor(CYAN);
+  gfx->printf("TX#:%03d", total_transmitted_http);
+  gfx->setCursor(2, 62);  // Line 4: 2 + 20 + 20 + 20 = 62px
+  if (memLeak > 200) {
+    gfx->setTextColor(RED);
+  } else if (memLeak > 100) {
+    gfx->setTextColor(YELLOW);
+  } else {
+    gfx->setTextColor(GREEN);
+  }
+  gfx->printf("Leak:%db/TX", memLeak);
+  #endif
   
   //// jwc 26-0125-0330 NEW: Draw latest tag data in LOWER-LEFT corner (if available)
   if (latestTag.hasData) {
@@ -906,9 +943,8 @@ void transmitAprilTagsWebSocket() {
 }
 #endif
 
+
 #if DEFINE_NETWORK_HTTP_BOOL
-//// jwc 26-0128-1440 NEW: HTTP POST transmission (stateless, no memory leak!)
-static int total_transmitted_http = 0;  // Track total HTTP messages sent
 
 //// jwc 26-0129-0750 CRITICAL FIX #2: Reuse HTTPClient object to prevent memory leak
 //// Creating new HTTPClient() every transmission leaks ~160 bytes (TCP buffers not freed)
@@ -929,6 +965,7 @@ void transmitAprilTagsHTTP() {
   Serial.printf("\n");
   
   //// Color-code based on memory level
+  //// jwc 26-0129-0950 UPDATED: Replace green (32m) with cyan (36m) - green not working in terminal
   if (freeHeap < 10000) {
     //// RED for critical (< 10KB)
     Serial.printf("\033[31m*** *** *** [MEM] CRITICAL: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
@@ -936,8 +973,8 @@ void transmitAprilTagsHTTP() {
     //// YELLOW for warning (10-15KB)
     Serial.printf("\033[33m*** *** *** [MEM] WARNING: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
   } else {
-    //// GREEN for OK (> 15KB)
-    Serial.printf("\033[32m*** *** *** [MEM] OK: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
+    //// CYAN for OK (> 15KB) - green (32m) not working, using cyan (36m) instead
+    Serial.printf("\033[36m*** *** *** [MEM] OK: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
   }
   Serial.printf("\n");
   
