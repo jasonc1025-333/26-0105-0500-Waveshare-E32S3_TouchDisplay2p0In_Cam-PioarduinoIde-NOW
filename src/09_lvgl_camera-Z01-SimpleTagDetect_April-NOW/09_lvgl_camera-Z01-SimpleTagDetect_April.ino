@@ -910,6 +910,11 @@ void transmitAprilTagsWebSocket() {
 //// jwc 26-0128-1440 NEW: HTTP POST transmission (stateless, no memory leak!)
 static int total_transmitted_http = 0;  // Track total HTTP messages sent
 
+//// jwc 26-0129-0750 CRITICAL FIX #2: Reuse HTTPClient object to prevent memory leak
+//// Creating new HTTPClient() every transmission leaks ~160 bytes (TCP buffers not freed)
+//// Solution: Static HTTPClient object reused across all transmissions
+static HTTPClient http;  // Persistent HTTP client (reused, not recreated)
+
 void transmitAprilTagsHTTP() {
   unsigned long currentTime = millis();
   
@@ -1829,6 +1834,13 @@ void setup() {
   #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
   //// jwc 26-0124-1030 PHASE 7: Initialize WiFi (common for both protocols)
   initWiFi();
+  
+  //// jwc 26-0129-0750 CRITICAL FIX #1: Disable WiFi sleep mode to prevent memory leak
+  //// WiFi power management causes TCP stack to reallocate buffers on wake (~160 bytes/TX leak)
+  //// Disabling sleep keeps WiFi active 24/7, preventing reallocation overhead
+  //// Trade-off: Higher power consumption, but stable memory usage
+  WiFi.setSleep(false);
+  Serial.println("*** WiFi sleep disabled (max performance mode)");
   
   //// jwc 26-0124-1030 PHASE 7: Initialize queue mutex (common for both protocols)
   queueMutex = xSemaphoreCreateMutex();
