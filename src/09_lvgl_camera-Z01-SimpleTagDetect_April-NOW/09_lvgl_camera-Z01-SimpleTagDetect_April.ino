@@ -2082,20 +2082,52 @@ void loop() {
   //// jwc 26-0127-2010 NEW: Memory monitoring for leak detection
   //// jwc 26-0130-0015 UPDATED: Enhanced memory tracking with MinDRAM and detection counter
   //// jwc 26-0130-0515 UPDATED: Added MemLoss per detection calculation
+  //// jwc 26-0130-0823 UPDATED: Added heap defragmentation every 60 seconds
+  //// jwc 26-0130-0855 CRITICAL FIX: Capture initial_heap AFTER first detection (not at boot!)
   //// Print heap and PSRAM usage every loop iteration to track memory leaks
   static unsigned long last_mem_print = 0;
-  static uint32_t initial_heap = 0;  // Track initial heap for leak calculation
+  static unsigned long last_defrag = 0;  // Track last defragmentation time
+  static uint32_t initial_heap = 0;  // Track initial heap AFTER first detection
+  static bool first_detection_done = false;  // Flag to capture heap after first detection
   unsigned long current_time = millis();
   
-  // Capture initial heap on first run
-  if (initial_heap == 0) {
-    initial_heap = ESP.getFreeHeap();
+  //// jwc 26-0130-0855 CRITICAL FIX: Capture initial_heap AFTER first detection
+  //// Problem: Old code captured at boot, including LVGL/WiFi/camera setup (~800KB!)
+  //// Result: mem_loss_per_detect was MASSIVELY inflated (18,100 bytes vs actual 93 bytes)
+  //// Solution: Capture AFTER first detection to measure ONLY detection leaks
+  if (total_detections == 1 && !first_detection_done) {
+    initial_heap = ESP.getFreeHeap();  // Capture AFTER first detection
+    first_detection_done = true;
+    Serial.println("*** [MEM] Initial heap captured after first detection");
+  }
+  
+  //// jwc 26-0130-0823 NEW: Emergency heap defragmentation every 60 seconds
+  //// jwc 26-0130-0847 UPDATED: Added before/after memory measurement for effectiveness tracking
+  //// Forces ESP32 to check heap integrity and consolidate free blocks
+  //// May help reduce fragmentation from repeated alloc/free cycles
+  //// Reference: Plan-MEMORY_LEAK_ANALYSIS_26-0130-0753.md - Fix #3
+  if (current_time - last_defrag >= 60000) {  // Every 60 seconds
+    uint32_t heap_before = ESP.getFreeHeap();
+    uint32_t largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    
+    heap_caps_check_integrity_all(true);  // Force heap cleanup
+    
+    uint32_t heap_after = ESP.getFreeHeap();
+    uint32_t largest_after = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    int heap_recovered = (int)heap_after - (int)heap_before;
+    int largest_improved = (int)largest_after - (int)largest_before;
+    
+    last_defrag = current_time;
+    Serial.printf(">>> >>> 26-0130-0847 [DEFRAG] Heap: %d→%d (%+d b) | Largest: %d→%d (%+d b)\n", 
+                  heap_before, heap_after, heap_recovered,
+                  largest_before, largest_after, largest_improved);
   }
   
   if (current_time - last_mem_print >= 5000) {  // Print every 5 seconds
     uint32_t current_heap = ESP.getFreeHeap();
     int mem_loss_total = (int)initial_heap - (int)current_heap;
-    int mem_loss_per_detect = (total_detections > 0) ? (mem_loss_total / total_detections) : 0;
+    //// jwc 26-0130-0855 UPDATED: Exclude first detection from average (it's the baseline)
+    int mem_loss_per_detect = (total_detections > 1) ? (mem_loss_total / (total_detections - 1)) : 0;
     
     Serial.printf("\n");
     Serial.printf("[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\n", 

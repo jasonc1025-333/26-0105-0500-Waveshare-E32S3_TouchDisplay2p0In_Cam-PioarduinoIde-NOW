@@ -117,27 +117,28 @@ for (int i = 0; i < zarray_size(quads); i++) {
 ### Fix #2: Investigate Additional 63-byte Leak
 **Strategy**: Add detailed memory tracking to identify source
 
-**Candidates to investigate**:
-1. **Pose estimation matrices** (line ~1900 in .ino)
-   - Check if `matd_destroy()` calls are complete
-   - Verify `R_transpose` and `camera_position` are freed
+y
 
-2. **Image conversion buffers** (line ~1700 in .ino)
-   - RGB565 buffer may be fragmenting heap
-   - Consider using static buffer instead of malloc
 
 3. **LVGL/GFX internal buffers**
    - Check if `draw16bitRGBBitmap()` allocates temporary buffers
    - May need to call cleanup function after draw
 
-### Fix #3: Emergency Heap Defragmentation
+### Fix #3: Emergency Heap Defragmentation ✅ IMPLEMENTED (jwc 26-0130-0823)
 **Add to loop()** (every 60 seconds):
 ```cpp
 if (millis() - last_defrag > 60000) {
     heap_caps_check_integrity_all(true);  // Force heap cleanup
     last_defrag = millis();
+    Serial.println(">>> >>> 26-0130-0800 [DEFRAG] Heap integrity check completed");
 }
 ```
+
+**Status**: ✅ **COMPLETED** - Added to `loop()` in .ino file
+- Runs every 60 seconds
+- Forces ESP32 to check heap integrity and consolidate free blocks
+- May help reduce fragmentation from repeated alloc/free cycles
+- Custom serial output for monitoring
 
 ---
 
