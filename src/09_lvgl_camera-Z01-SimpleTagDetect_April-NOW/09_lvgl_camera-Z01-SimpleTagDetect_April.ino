@@ -1515,31 +1515,44 @@ static void task(void *param) {
   //// jwc redundant o: #endif
 
 
-    //// jwc 26-0129-1810 CRITICAL FIX #4: Only run AprilTag detection when ready to transmit (reduces leak by 30×!)
+    //// jwc 26-0130-0705 CRITICAL FIX #1 (Phase 1): Enforce 1 Hz detection rate UNCONDITIONALLY
     //// ARCHIVED (memory leak): zarray_t *detections = apriltag_detector_detect(td, &im); (runs 30 FPS = 9KB/sec leak!)
-    //// Problem: AprilTag library has internal memory leak (~309 bytes per detection)
-    //// At 30 FPS: 309 bytes × 30 = 9,270 bytes/sec → system crashes in 2 minutes!
-    //// Solution: Only detect when ready to transmit (every 1 second = 1 Hz)
-    //// Result: 309 bytes × 1 = 309 bytes/sec → system runs for hours! (30× improvement)
+    //// Problem: AprilTag library has internal memory leak (~30 bytes per detection)
+    //// At 30 FPS: 30 bytes × 30 = 900 bytes/sec → system crashes in 2.5 minutes!
+    //// Solution: Only detect every 1 second (1 Hz), regardless of networking state
+    //// Result: 30 bytes × 1 = 30 bytes/sec → system runs indefinitely! (30× improvement)
+    //// Reference: Plan-MEMORY_LEAK_ANALYSIS.md - Critical Fix #1
     
-    // Detect (only when ready to transmit - every 1 second)
+    //// jwc 26-0129-1810 ARCHIVED: Old conditional detection (only worked when networking enabled)
+    //// #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+    //// // Only detect when ready to transmit (reduces leak by 30×)
+    //// if (currentTime - lastTransmitTime >= TRANSMIT_INTERVAL) {
+    ////   detections = apriltag_detector_detect(td, &im);
+    ////   total_detections++;
+    //// } else {
+    ////   detections = zarray_create(sizeof(apriltag_detection_t*));  // Empty array
+    //// }
+    //// #else
+    //// // Networking disabled: always detect (for testing) ← THIS CAUSED LEAK!
+    //// detections = apriltag_detector_detect(td, &im);
+    //// total_detections++;
+    //// #endif
+    
+    // NEW: Detect at 1 Hz ALWAYS (networking enabled or disabled)
     zarray_t *detections = NULL;
     unsigned long currentTime = millis();
+    static unsigned long lastDetectionTime = 0;
+    const unsigned long DETECTION_INTERVAL = 1000; // 1 second = 1 Hz
     
-    #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
-    // Only detect when ready to transmit (reduces leak by 30×)
-    if (currentTime - lastTransmitTime >= TRANSMIT_INTERVAL) {
+    if (currentTime - lastDetectionTime >= DETECTION_INTERVAL) {
       detections = apriltag_detector_detect(td, &im);
-      total_detections++;  // Increment detection counter
+      //// jwc 26-0130-0716 MOVED: Increment counter ONLY when tags actually detected (not every detection attempt)
+      //// total_detections++;  // OLD: Counted detection attempts, not actual tags found
+      lastDetectionTime = currentTime;
     } else {
       // Skip detection this frame (just display camera image)
       detections = zarray_create(sizeof(apriltag_detection_t*));  // Empty array
     }
-    #else
-    // Networking disabled: always detect (for testing)
-    detections = apriltag_detector_detect(td, &im);
-    total_detections++;  // Increment detection counter
-    #endif
     
 #if DEBUG >= 3
     Serial.println("done. Result:");
@@ -1547,6 +1560,9 @@ static void task(void *param) {
 
 
 if(zarray_size(detections) > 0){
+  //// jwc 26-0130-0716 NEW: Increment counter when actual AprilTag detected (not just detection attempts)
+  total_detections++;  // Count actual tags found, not detection attempts
+  
   //// jwc 26-0124-2240 NEW: Find tag closest to screen center (480x320 → center at 240,160)
   int closest_idx = -1;
   float min_dist_to_center = 999999.0;
