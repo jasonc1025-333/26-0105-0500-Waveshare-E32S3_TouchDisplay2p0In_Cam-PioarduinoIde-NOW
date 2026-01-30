@@ -71,9 +71,11 @@
 //// #endif
 
 //// jwc 26-0128-1440 NEW: Dual protocol support - HTTP vs WebSocket
+//// jwc 26-0130-0927 TESTING: Enable HTTP to test if it has memory leaks
+//// jwc 26-0130-1000 TESTING: Switch to WebSocket per user request
 //// Set one to 1 to enable (test HTTP as alternative to leaky WebSocket)
 #define DEFINE_NETWORK_HTTP_BOOL 0        // HTTP POST protocol (stateless, simpler)
-#define DEFINE_NETWORK_WEBSOCKET_BOOL 0   // WebSocket protocol (MEMORY LEAK!)
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 1   // WebSocket protocol - TESTING NOW
 
 #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
 //// jwc 26-0124-1030 PHASE 1: WiFi includes + configuration
@@ -758,9 +760,10 @@ void setupWebSocketHandlers() {
   
   //// jwc 26-0128-1420 NEW: Use c_str() directly to avoid String allocation
   //// message.c_str() returns const char* from internal buffer (no heap allocation)
+  //// jwc 26-0130-1022 NEW: Added green color indicator (matches HTTP success format)
   webSocket.onMessage([](WebsocketsMessage message) {
     const char* data = message.c_str();
-    Serial.printf("*** Esp32 <<-- SvHub: RX: %s\n", data);
+    Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: RX: %s\033[0m\n", data);
   });
   
   webSocket.onEvent([](WebsocketsEvent event, String data) {
