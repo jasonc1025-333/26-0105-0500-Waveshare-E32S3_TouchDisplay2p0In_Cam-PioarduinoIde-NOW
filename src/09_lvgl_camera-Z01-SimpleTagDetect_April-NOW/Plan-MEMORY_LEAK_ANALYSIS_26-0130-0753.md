@@ -117,8 +117,14 @@ for (int i = 0; i < zarray_size(quads); i++) {
 ### Fix #2: Investigate Additional 63-byte Leak
 **Strategy**: Add detailed memory tracking to identify source
 
-y
+**Candidates to investigate**:
+1. **Pose estimation matrices** (line ~1900 in .ino)
+   - Check if `matd_destroy()` calls are complete
+   - Verify `R_transpose` and `camera_position` are freed
 
+2. **Image conversion buffers** (line ~1700 in .ino)
+   - RGB565 buffer may be fragmenting heap
+   - Consider using static buffer instead of malloc
 
 3. **LVGL/GFX internal buffers**
    - Check if `draw16bitRGBBitmap()` allocates temporary buffers
