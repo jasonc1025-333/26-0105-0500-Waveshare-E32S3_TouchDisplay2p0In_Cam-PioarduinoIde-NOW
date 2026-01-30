@@ -7,7 +7,10 @@ static char rx_buffer[256];
 static int rx_index = 0;
 
 //// jwc 26-0109-1520 NEW: Comm display buffer and state
-String comm_lines[MAX_COMM_LINES];
+//// jwc 26-0130-0450 ARCHIVED: Arduino String causes memory leak (heap fragmentation)
+//// String comm_lines[MAX_COMM_LINES];
+//// jwc 26-0130-0450 NEW: C-style char arrays (stack-allocated, zero heap fragmentation!)
+char comm_lines[MAX_COMM_LINES][MAX_LINE_LENGTH];
 int comm_line_count = 0;
 bool comm_display_enabled = false;
 
@@ -79,14 +82,23 @@ void Serial_Comms_Task(void *parameter) {
 }
 
 //// jwc 26-0109-1520 NEW: Add line to comm buffer (newest at top, push older down)
+//// jwc 26-0130-0450 UPDATED: Use strncpy() instead of String assignment (eliminates memory leak!)
 void Comm_Add_Line(const char* line) {
   // Shift all existing lines down by one position
   for(int i = MAX_COMM_LINES - 1; i > 0; i--) {
-    comm_lines[i] = comm_lines[i - 1];
+    //// jwc 26-0130-0450 ARCHIVED: String assignment causes heap fragmentation
+    //// comm_lines[i] = comm_lines[i - 1];
+    //// jwc 26-0130-0450 NEW: strncpy() uses stack memory (no heap allocation!)
+    strncpy(comm_lines[i], comm_lines[i - 1], MAX_LINE_LENGTH - 1);
+    comm_lines[i][MAX_LINE_LENGTH - 1] = '\0';  // Ensure null termination
   }
   
   // Insert new line at top (index 0)
-  comm_lines[0] = String(line);
+  //// jwc 26-0130-0450 ARCHIVED: String constructor causes heap allocation
+  //// comm_lines[0] = String(line);
+  //// jwc 26-0130-0450 NEW: strncpy() copies to stack buffer (no heap!)
+  strncpy(comm_lines[0], line, MAX_LINE_LENGTH - 1);
+  comm_lines[0][MAX_LINE_LENGTH - 1] = '\0';  // Ensure null termination
   
   // Track count (max MAX_COMM_LINES)
   if(comm_line_count < MAX_COMM_LINES) {

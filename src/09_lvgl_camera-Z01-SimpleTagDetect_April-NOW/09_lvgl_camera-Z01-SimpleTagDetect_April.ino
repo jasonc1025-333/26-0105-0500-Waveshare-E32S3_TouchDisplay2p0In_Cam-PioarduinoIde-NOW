@@ -522,6 +522,7 @@ void lvgl_camera_ui_init(lv_obj_t *parent) {
 
 //// jwc 26-0109-1520 NEW: Draw comm text overlay (yellow text on black background)
 //// jwc 26-0110-0820 UPDATED: Remove black background, decrease font size for 20 lines
+//// jwc 26-0130-0450 UPDATED: Use char* directly (no String.c_str() conversion needed!)
 void draw_comm_overlay() {
   if(!comm_display_enabled) return;
   
@@ -543,6 +544,9 @@ void draw_comm_overlay() {
   
   for(int i = 0; i < comm_line_count && y < TEXT_AREA_HEIGHT; i++) {
     gfx->setCursor(5, y);
+    //// jwc 26-0130-0450 ARCHIVED: String.c_str() conversion (no longer needed!)
+    //// gfx->println(comm_lines[i].c_str());
+    //// jwc 26-0130-0450 NEW: comm_lines[i] is already char* (direct use!)
     gfx->println(comm_lines[i]);
     y += line_height;
   }
@@ -2061,28 +2065,37 @@ void setup() {
 void loop() {
   //// jwc 26-0127-2010 NEW: Memory monitoring for leak detection
   //// jwc 26-0130-0015 UPDATED: Enhanced memory tracking with MinDRAM and detection counter
+  //// jwc 26-0130-0515 UPDATED: Added MemLoss per detection calculation
   //// Print heap and PSRAM usage every loop iteration to track memory leaks
   static unsigned long last_mem_print = 0;
+  static uint32_t initial_heap = 0;  // Track initial heap for leak calculation
   unsigned long current_time = millis();
-  if (current_time - last_mem_print >= 5000) {  // Print every 5 seconds
-    Serial.printf("\n");
-    Serial.printf("[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d\n", 
-                  ESP.getFreeHeap(), 
-                  ESP.getFreePsram(),
-                  ESP.getMinFreeHeap(),
-                  total_detections);
-    Serial.printf("[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d\n", 
-                  ESP.getFreeHeap(), 
-                  ESP.getFreePsram(),
-                  ESP.getMinFreeHeap(),
-                  total_detections);
-    Serial.printf("\n");
-    last_mem_print = current_time;
+  
+  // Capture initial heap on first run
+  if (initial_heap == 0) {
+    initial_heap = ESP.getFreeHeap();
   }
   
-  if (lvgl_lock(-1)) {
-    lv_timer_handler(); /* let the GUI do its work */
-    lvgl_unlock();
+  if (current_time - last_mem_print >= 5000) {  // Print every 5 seconds
+    uint32_t current_heap = ESP.getFreeHeap();
+    int mem_loss_total = (int)initial_heap - (int)current_heap;
+    int mem_loss_per_detect = (total_detections > 0) ? (mem_loss_total / total_detections) : 0;
+    
+    Serial.printf("\n");
+    Serial.printf("[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\n", 
+                  current_heap, 
+                  ESP.getFreePsram(),
+                  ESP.getMinFreeHeap(),
+                  total_detections,
+                  mem_loss_per_detect);
+    Serial.printf("[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\n", 
+                  current_heap, 
+                  ESP.getFreePsram(),
+                  ESP.getMinFreeHeap(),
+                  total_detections,
+                  mem_loss_per_detect);
+    Serial.printf("\n");
+    last_mem_print = current_time;
   }
 
   //// jwc 26-0109-1200 ARCHIVED: Simple serial TX/RX (replaced by Serial_Comms task)

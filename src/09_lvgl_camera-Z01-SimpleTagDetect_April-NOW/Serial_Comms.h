@@ -27,7 +27,11 @@
 //// jwc 26-0110-0820 ARCHIVED: #define MAX_COMM_LINES 10
 //// jwc 26-0110-0820 NEW: Increase to 20 lines for upper 75% of screen
 #define MAX_COMM_LINES 20
-extern String comm_lines[MAX_COMM_LINES];
+//// jwc 26-0130-0450 ARCHIVED: Arduino String causes memory leak (heap fragmentation)
+//// extern String comm_lines[MAX_COMM_LINES];
+//// jwc 26-0130-0450 NEW: C-style char arrays (stack-allocated, zero heap fragmentation!)
+#define MAX_LINE_LENGTH 64  // Maximum characters per line (including null terminator)
+extern char comm_lines[MAX_COMM_LINES][MAX_LINE_LENGTH];
 extern int comm_line_count;
 extern bool comm_display_enabled;
 
