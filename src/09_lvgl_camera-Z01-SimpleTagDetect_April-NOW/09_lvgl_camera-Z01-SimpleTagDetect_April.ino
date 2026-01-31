@@ -221,9 +221,12 @@ int queueTail = 0;
 int queueCount = 0;
 SemaphoreHandle_t queueMutex = NULL;
 
-//// jwc 26-0124-1030 Timing control for network transmission (protocol-agnostic)
-unsigned long lastTransmitTime = 0;
-const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
+//// jwc 26-0131-1335 REMOVED: 1-second transmission interval (redundant with 5-second lock!)
+//// Old system: Enqueue every detection (30 FPS) → transmit every 1 sec (rate limit)
+//// New system: Only enqueue when 5-sec lock achieved → transmit immediately (already rate-limited!)
+//// Result: 1-second interval is REDUNDANT and was blocking transmissions!
+//// unsigned long lastTransmitTime = 0;
+//// const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
 #endif
 
 #if DEFINE_NETWORK_HTTP_BOOL
@@ -267,6 +270,28 @@ struct LatestTagDisplay {
   float z = 0;
   float range = 0;  // Distance to tag
 } latestTag;
+
+//// jwc 26-0131-1205 NEW: Tag lock state machine (immediate transmission on first detection)
+//// jwc 26-0131-1240 UPDATED: Reset lock after each transmission (must relock each time)
+//// jwc 26-0131-1450 UPDATED: Changed from 5-second lock to immediate (> 0 sec)
+//// jwc 26-0131-1510 UPDATED: Renamed variables for clarity (_msec suffix)
+//// Prevents spurious transmissions, reduces network traffic
+struct TagLockState {
+  int locked_tag_id = -1;                              // Currently locked tag ID (-1 = none)
+  unsigned long lock_start_time_msec = 0;              // When lock started (millis)
+  unsigned long last_seen_time_msec = 0;               // Last time this tag was detected
+  bool lock_achieved = false;                          // Has lock been achieved?
+
+  //// jwc 26-0131-1450 ARCHIVED: 5-second lock (too slow for testing)
+  //// const unsigned long LOCK_DURATION = 5000;       // 5 seconds continuous detection required
+  //// jwc y const unsigned long LOCK_DURATION = 5000;    // 5 seconds continuous detection required
+  const unsigned long LOCK_DURATION_MSEC = 0;          // Immediate (> 0 msec) - transmit on first detection
+  
+  //// jwc 26-0131-1450 NEW: Immediate lock (> 0 sec = instant transmission)  
+  //// jwc y const unsigned long LOCK_POSTRESET_TIMEOUT_MSEC = 2000;  // 2 seconds without tag = reset lock
+  //// jwc n const unsigned long LOCK_POSTRESET_TIMEOUT_MSEC = 0;  // 0 seconds without tag = reset lock
+  const unsigned long LOCK_POSTRESET_TIMEOUT_MSEC = 1000;  // 0 seconds without tag = reset lock
+} tagLock;
 
 /*To use the built-in examples and demos of LVGL uncomment the includes below respectively.
  *You also need to copy `lvgl/examples` to `lvgl/src/examples`. Similarly for the demos `lvgl/demos` to `lvgl/src/demos`.
@@ -846,13 +871,13 @@ void setupWebSocketHandlers() {
 //// jwc 26-0124-1800 UPDATED: Added range parameter
 //// jwc 26-0125-0430 UPDATED: Only enqueue first tag per 1-second interval (drop others to reduce traffic)
 void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, float roll, float x, float y, float z, float range) {
-  //// jwc 26-0125-0430 NEW: Check if we're within 1-second interval since last transmission
-  unsigned long currentTime = millis();
-  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
-    //// Drop this tag - we already have one queued for this interval
-    Serial.printf("*** DROPPED tag ID %d (within 1-sec interval, reducing traffic)\n", id);
-    return;
-  }
+  //// jwc 26-0131-1335 REMOVED: 1-second interval check in enqueue (redundant!)
+  //// 5-second lock already ensures only 1 enqueue per 5+ seconds
+  //// unsigned long currentTime = millis();
+  //// if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
+  ////   Serial.printf("*** DROPPED tag ID %d (within 1-sec interval, reducing traffic)\n", id);
+  ////   return;
+  //// }
   
   if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     if (queueCount < MAX_QUEUE_SIZE) {
@@ -1003,26 +1028,23 @@ void transmitAprilTagsWebSocket() {
 //// UDP is fire-and-forget: no connection, no handshake, no TIME_WAIT state
 //// Expected result: ZERO memory leaks (no TCP buffers, no socket state)
 //// jwc 26-0131-0200 UPDATED: Added UDP receive for server acknowledgments
+//// jwc 26-0131-1350 CRITICAL FIX: Bypass queue entirely - transmit immediately when called!
+//// Old system: Lock → enqueue → main loop → check queue → transmit (BROKEN - queue never processed!)
+//// New system: Lock → transmit immediately (WORKS - no queue delays!)
 
 static int total_transmitted_udp = 0;  // Track total UDP packets sent
 WiFiUDP udp;  // UDP client object
 
-void transmitAprilTagsUDP() {
-  unsigned long currentTime = millis();
-  
-  // Check if it's time to transmit
-  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
-    return;
-  }
-  
+//// jwc 26-0131-1350 NEW: Immediate transmission function (no queue!)
+//// Called directly when lock achieved - bypasses queue entirely
+void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, float pitch, float roll, 
+                                    float x, float y, float z, float range) {
   //// Color-coded memory monitoring
   uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t minFreeHeap = ESP.getMinFreeHeap();
   uint32_t freePsram = ESP.getFreePsram();
   Serial.printf("\n");
-  
-  //// BLUE for all memory levels (user request: print only in blue font-color)
-  Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_udp);
+  Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", 
+                freeHeap, freePsram, total_transmitted_udp);
   Serial.printf("\n");
   
   // Check if WiFi is connected
@@ -1031,108 +1053,87 @@ void transmitAprilTagsUDP() {
     return;
   }
   
-  // Check if queue has data
-  if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (queueCount > 0) {
-      // Send each tag as individual UDP packet
-      int transmitted = 0;
-      while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
-        // Create JSON document for single tag (STACK-ALLOCATED - no heap leak!)
-        StaticJsonDocument<512> doc;
-        doc["tag_id"] = tagQueue[queueHead].id;
-        doc["decision_margin"] = round(tagQueue[queueHead].decision_margin * 10.0) / 10.0;
-        doc["yaw"] = round(tagQueue[queueHead].yaw * 10.0) / 10.0;
-        doc["pitch"] = round(tagQueue[queueHead].pitch * 10.0) / 10.0;
-        doc["roll"] = round(tagQueue[queueHead].roll * 10.0) / 10.0;
-        doc["x_cm"] = round(tagQueue[queueHead].x * 10.0) / 10.0;
-        doc["y_cm"] = round(tagQueue[queueHead].y * 10.0) / 10.0;
-        doc["z_cm"] = round(tagQueue[queueHead].z * 10.0) / 10.0;
-        doc["range_cm"] = round(tagQueue[queueHead].range * 10.0) / 10.0;
-        doc["timestamp"] = tagQueue[queueHead].timestamp;
-        doc["camera_name"] = "Waveshare-ESP32-S3";
-        
-        // Add IP address (stack-allocated buffer)
-        char ipBuffer[16];
-        IPAddress ip = WiFi.localIP();
-        snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-        doc["smartcam_ip"] = ipBuffer;
-        
-        // Serialize JSON to stack buffer
-        char jsonBuffer[512];
-        serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
-        
-        //// UDP transmission (fire-and-forget, no response expected)
-        udp.beginPacket(server_host, server_port);
-        udp.write((const uint8_t*)jsonBuffer, strlen(jsonBuffer));
-        int result = udp.endPacket();
-        
-        //// Color-coded status reporting
-        if (result == 1) {
-          //// GREEN for success (packet sent)
-          Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: UDP TX SUCCESS: %s\033[0m\n", jsonBuffer);
+  // Create JSON document for single tag (STACK-ALLOCATED - no heap leak!)
+  StaticJsonDocument<512> doc;
+  doc["tag_id"] = id;
+  doc["decision_margin"] = round(decision_margin * 10.0) / 10.0;
+  doc["yaw"] = round(yaw * 10.0) / 10.0;
+  doc["pitch"] = round(pitch * 10.0) / 10.0;
+  doc["roll"] = round(roll * 10.0) / 10.0;
+  doc["x_cm"] = round(x * 10.0) / 10.0;
+  doc["y_cm"] = round(y * 10.0) / 10.0;
+  doc["z_cm"] = round(z * 10.0) / 10.0;
+  doc["range_cm"] = round(range * 10.0) / 10.0;
+  doc["timestamp"] = millis();
+  doc["camera_name"] = "Waveshare-ESP32-S3";
+  
+  // Add IP address (stack-allocated buffer)
+  char ipBuffer[16];
+  IPAddress ip = WiFi.localIP();
+  snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  doc["smartcam_ip"] = ipBuffer;
+  
+  // Serialize JSON to stack buffer
+  char jsonBuffer[512];
+  serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+  
+  //// UDP transmission (fire-and-forget, no response expected)
+  udp.beginPacket(server_host, server_port);
+  udp.write((const uint8_t*)jsonBuffer, strlen(jsonBuffer));
+  int result = udp.endPacket();
+  
+  //// Color-coded status reporting
+  if (result == 1) {
+    //// GREEN for success (packet sent)
+    Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: UDP TX SUCCESS: %s\033[0m\n", jsonBuffer);
+    
+    //// jwc 26-0131-0210 NEW: Wait for UDP ACK from server (with timeout)
+    unsigned long ack_start = millis();
+    const unsigned long ACK_TIMEOUT = 500;  // 500ms timeout
+    
+    while (millis() - ack_start < ACK_TIMEOUT) {
+      int packetSize = udp.parsePacket();
+      if (packetSize > 0) {
+        // Received UDP response from server
+        char ackBuffer[256];
+        int len = udp.read(ackBuffer, sizeof(ackBuffer) - 1);
+        if (len > 0) {
+          ackBuffer[len] = '\0';  // Null-terminate
           
-          //// jwc 26-0131-0210 NEW: Wait for UDP ACK from server (with timeout)
-          unsigned long ack_start = millis();
-          const unsigned long ACK_TIMEOUT = 500;  // 500ms timeout
+          // Parse JSON ACK
+          StaticJsonDocument<256> ackDoc;
+          DeserializationError error = deserializeJson(ackDoc, ackBuffer);
           
-          while (millis() - ack_start < ACK_TIMEOUT) {
-            int packetSize = udp.parsePacket();
-            if (packetSize > 0) {
-              // Received UDP response from server
-              char ackBuffer[256];
-              int len = udp.read(ackBuffer, sizeof(ackBuffer) - 1);
-              if (len > 0) {
-                ackBuffer[len] = '\0';  // Null-terminate
-                
-                // Parse JSON ACK
-                StaticJsonDocument<256> ackDoc;
-                DeserializationError error = deserializeJson(ackDoc, ackBuffer);
-                
-                if (!error) {
-                  const char* event = ackDoc["event"];
-                  const char* status = ackDoc["status"];
-                  int ack_tag_id = ackDoc["tag_id"];
-                  
-                  // Print ACK with tag_id confirmation
-                  Serial.printf("\033[36m*** ✅ Esp32 <<-- SvHub: UDP ACK received | tag_id=%d, status=%s\033[0m\n", 
-                                ack_tag_id, status ? status : "unknown");
-                } else {
-                  Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK parse error: %s\033[0m\n", ackBuffer);
-                }
-              }
-              break;  // Got response, exit wait loop
-            }
-            delay(10);  // Small delay before checking again
+          if (!error) {
+            const char* event = ackDoc["event"];
+            const char* status = ackDoc["status"];
+            int ack_tag_id = ackDoc["tag_id"];
+            
+            // Print ACK with tag_id confirmation
+            Serial.printf("\033[36m*** ✅ Esp32 <<-- SvHub: UDP ACK received | tag_id=%d, status=%s\033[0m\n", 
+                          ack_tag_id, status ? status : "unknown");
+          } else {
+            Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK parse error: %s\033[0m\n", ackBuffer);
           }
-          
-          if (millis() - ack_start >= ACK_TIMEOUT) {
-            Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK timeout (no response)\033[0m\n");
-          }
-        } else {
-          //// RED for failure
-          Serial.printf("\033[31m*** ❌ Esp32 -->> SvHub: UDP TX FAILED: %s\033[0m\n", jsonBuffer);
         }
-        
-        queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
-        queueCount--;
-        transmitted++;
+        break;  // Got response, exit wait loop
       }
-      
-      total_transmitted_udp += transmitted;
-      
-      Serial.printf("*** Esp32 -->> SvHub: Sent %d tags via UDP\n", transmitted);
-      lastTransmitTime = currentTime;
-      
-      // Clear queue after transmission
-      queueHead = 0;
-      queueTail = 0;
-      queueCount = 0;
-      memset(tagQueue, 0, sizeof(tagQueue));
-      Serial.println("*** Queue cleared after transmission");
+      delay(10);  // Small delay before checking again
     }
-    xSemaphoreGive(queueMutex);
+    
+    if (millis() - ack_start >= ACK_TIMEOUT) {
+      Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK timeout (no response)\033[0m\n");
+    }
+    
+    total_transmitted_udp++;  // Increment counter on success
+  } else {
+    //// RED for failure
+    Serial.printf("\033[31m*** ❌ Esp32 -->> SvHub: UDP TX FAILED: %s\033[0m\n", jsonBuffer);
   }
 }
+
+//// jwc 26-0131-1350 ARCHIVED: Old queue-based transmission (replaced by immediate transmission)
+//// void transmitAprilTagsUDP() { ... }
 #endif
 
 #if DEFINE_NETWORK_HTTP_BOOL
@@ -1841,12 +1842,17 @@ static void task(void *param) {
 #endif
 
 
+//// jwc 26-0131-1230 NEW: Declare closest_idx BEFORE first if() block (scope fix)
+//// Compiler error: "closest_idx not declared in this scope" at line 1937
+//// Root cause: Variable declared inside if(zarray_size > 0) block, used outside it
+//// Solution: Declare at function scope (before any if blocks)
+int closest_idx = -1;
+
 if(zarray_size(detections) > 0){
   //// jwc 26-0130-0716 NEW: Increment counter when actual AprilTag detected (not just detection attempts)
   total_detections++;  // Count actual tags found, not detection attempts
   
   //// jwc 26-0124-2240 NEW: Find tag closest to screen center (480x320 → center at 240,160)
-  int closest_idx = -1;
   float min_dist_to_center = 999999.0;
   float screen_center_x = 240.0;
   float screen_center_y = 160.0;
@@ -1865,6 +1871,69 @@ if(zarray_size(detections) > 0){
       closest_idx = i;
     }
   }
+  
+  //// jwc 26-0131-1210 NEW: Tag lock state machine (5-second continuous detection)
+  //// Extract detected tag ID for lock logic
+  int detected_tag_id = -1;
+  if (closest_idx >= 0) {
+    apriltag_detection_t *det;
+    zarray_get(detections, closest_idx, &det);
+    detected_tag_id = det->id;
+  }
+  
+  //// jwc 26-0131-1240 UPDATED: Reset lock after each transmission (must relock 5 sec each time)
+  //// Update tag lock state machine
+  unsigned long now = millis();
+  
+  if (detected_tag_id != -1) {
+    if (tagLock.locked_tag_id == -1) {
+      //// No tag locked yet - start new lock
+      tagLock.locked_tag_id = detected_tag_id;
+      tagLock.lock_start_time_msec = now;
+      tagLock.last_seen_time_msec = now;
+      tagLock.lock_achieved = false;
+      Serial.printf("*** [LOCK] Started locking tag ID %d\n", detected_tag_id);
+    } else if (tagLock.locked_tag_id == detected_tag_id) {
+      //// Same tag - update timer and check if lock achieved
+      tagLock.last_seen_time_msec = now;
+      unsigned long lock_duration = now - tagLock.lock_start_time_msec;
+      
+      if (!tagLock.lock_achieved && lock_duration >= tagLock.LOCK_DURATION_MSEC) {
+        //// jwc 26-0131-1405 CRITICAL FIX: Set flag BEFORE reset (was resetting immediately!)
+        //// BUG: Old code set lock_achieved=true, then IMMEDIATELY reset to false
+        //// Result: Transmission code never saw lock_achieved=true (always false!)
+        //// FIX: Keep flag true until AFTER transmission completes
+        tagLock.lock_achieved = true;
+        //// jwc 26-0131-1450 ARCHIVED: 5-second lock message
+        //// Serial.printf("*** [LOCK] ✅ ACHIEVED for tag ID %d (5 sec continuous) - FLAG SET\n", detected_tag_id);
+        //// jwc 26-0131-1450 NEW: Immediate lock message
+        Serial.printf("*** [LOCK] ✅ ACHIEVED for tag ID %d (immediate) - FLAG SET\n", detected_tag_id);
+        
+        //// jwc 26-0131-1405 MOVED: Reset logic moved to AFTER transmission (line ~1950)
+        //// Old location: Reset immediately (WRONG - transmission never saw flag!)
+        //// New location: After transmitAprilTagUDP_Immediate() completes (CORRECT!)
+      }
+    } else {
+      //// Different tag detected - reset lock and start fresh
+      Serial.printf("*** [LOCK] ⚠️ RESET (tag changed: %d → %d)\n", tagLock.locked_tag_id, detected_tag_id);
+      tagLock.locked_tag_id = detected_tag_id;
+      tagLock.lock_start_time_msec = now;
+      tagLock.last_seen_time_msec = now;
+      tagLock.lock_achieved = false;
+    }
+  }
+} else {
+  //// jwc 26-0131-1215 NEW: No tags detected - check for lock timeout
+  unsigned long now = millis();
+  if (tagLock.locked_tag_id != -1 && (now - tagLock.last_seen_time_msec >= tagLock.LOCK_POSTRESET_TIMEOUT_MSEC)) {
+    //// Tag lost for 2+ seconds - reset lock
+    Serial.printf("*** [LOCK] ❌ TIMEOUT (tag ID %d lost for 2+ sec)\n", tagLock.locked_tag_id);
+    tagLock.locked_tag_id = -1;
+    tagLock.lock_achieved = false;
+  }
+}
+
+if(zarray_size(detections) > 0 && closest_idx >= 0){
   
   //// jwc 26-0124-2240 Process ONLY the closest tag (prevents freeze with multiple tags)
   //// jwc 26-0125-0400 UPDATED: Moved tag ID display from upper-left to upper-right
@@ -1885,7 +1954,9 @@ if(zarray_size(detections) > 0){
       //// jwc \/
       //// jwc y Serial.print(" *** ");
       
-      //// jwc 26-0125-0400 NEW: Display tag ID in upper-right corner (large font)
+      //// jwc 26-0131-1220 NEW: Display tag ID with lock status and countdown timer
+      //// jwc 26-0131-1220 ARCHIVED: Original even/odd color scheme (replaced by lock-based colors)
+      //// jwc 26-0125-0400 ARCHIVED: if(det->id % 2 == 0){ gfx->setTextColor(BLUE); } else { gfx->setTextColor(RED); }
       gfx->setTextSize(5);
       
       //// Calculate x position for right-aligned text (approximate width: 80px for 2 digits)
@@ -1893,19 +1964,40 @@ if(zarray_size(detections) > 0){
       int x_pos = 240 - tag_id_width;  // Right-align
       gfx->setCursor(x_pos, 1);
       
+      //// jwc 26-0131-1245 UPDATED: Keep original BLUE/RED (change to ORANGE), remove lock colors
+      //// Original color scheme: even=BLUE, odd=RED (user request: change RED to ORANGE)
       if(det->id % 2 == 0){
-        // Even #
         //// jwc oo tft.setTextColor(TFT_BLUE);      
         gfx->setTextColor(BLUE);      
-      }
-      else{
-        // Odd #
+      } else {
+        //// jwc 26-0131-1245 UPDATED: Changed from RED to ORANGE per user request
         //// jwc oo tft.setTextColor(TFT_RED);
-        gfx->setTextColor(RED);
+        gfx->setTextColor(ORANGE);
       }
+      
+      //// Display tag ID
       //// jwc tft.printf(" *** %d", (det->id));
       //// jwc oo tft.printf("%d ", (det->id));
       gfx->printf("%d ", (det->id));
+      
+      //// jwc 26-0131-1245 NEW: Add countdown timer (same font size as tag ID)
+      //// jwc 26-0131-1450 ARCHIVED: Countdown timer (not needed for immediate lock)
+      //// jwc 26-0131-1510 UPDATED: Renamed lock_start_time → lock_start_time_msec
+      if (tagLock.locked_tag_id == det->id && !tagLock.lock_achieved) {
+        //// Show countdown timer while locking (0.0s → 5.0s)
+        unsigned long now = millis();
+        float elapsed = (now - tagLock.lock_start_time_msec) / 1000.0;
+        gfx->setTextSize(2);  // Same font size as HUD (was 3, now 2)
+        gfx->setTextColor(YELLOW);
+        gfx->setCursor(x_pos, 45);  // Below tag ID
+        gfx->printf("(%.1fs)", elapsed);
+      } else if (tagLock.locked_tag_id == det->id && tagLock.lock_achieved) {
+        //// Show "LOCK" indicator when locked (brief moment before reset)
+        gfx->setTextSize(2);  // Same font size as HUD (was 3, now 2)
+        gfx->setTextColor(GREEN);
+        gfx->setCursor(x_pos, 45);
+        gfx->printf("(LOCK)");
+      }
 
       //// jwc add pose: Serial.print("*** *** ");
       //// jwc add pose: Serial.print(det->id);
@@ -1995,22 +2087,34 @@ if(zarray_size(detections) > 0){
       latestTag.z = z_cm;
       latestTag.range = range_cm;
       
-      //// jwc 26-0128-1440 ARCHIVED: Old DEFINE_NETWORKING_BOOL guard
-      //// #if DEFINE_NETWORKING_BOOL
-      //// //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for WebSocket transmission
-      //// //// jwc 26-0124-1745 FIX: Use extracted values (not freed memory!)
-      //// //// jwc 26-0124-1800 NEW: Pass range to enqueue function
-      //// enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
-      ////                 x_cm, y_cm, z_cm, range_cm);
-      //// #endif
-      
-      //// jwc 26-0128-1440 NEW: Protocol-agnostic enqueue (works for HTTP, WebSocket, and UDP)
-      #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
-      //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for network transmission
-      //// jwc 26-0124-1745 FIX: Use extracted values (not freed memory!)
-      //// jwc 26-0124-1800 NEW: Pass range to enqueue function
-      enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
-                      x_cm, y_cm, z_cm, range_cm);
+      //// jwc 26-0131-1350 CRITICAL FIX: Transmit immediately when lock achieved (no queue!)
+      //// jwc 26-0131-1405 CRITICAL FIX #2: Reset lock AFTER transmission (not before!)
+      //// Old: Lock → enqueue → main loop → check queue → transmit (BROKEN!)
+      //// New: Lock → transmit immediately (WORKS!)
+      #if DEFINE_NETWORK_UDP_BOOL
+      if (tagLock.lock_achieved) {
+        //// Lock achieved - transmit immediately (no queue!)
+        transmitAprilTagUDP_Immediate(det->id, det->decision_margin, yaw, pitch, roll, 
+                                       x_cm, y_cm, z_cm, range_cm);
+        Serial.printf("*** [LOCK] 📤 TRANSMITTED tag ID %d immediately (no queue)\n", det->id);
+        
+        //// jwc 26-0131-1405 NEW: Reset lock AFTER transmission completes
+        //// jwc 26-0131-1450 UPDATED: Changed from 5-second to immediate relock
+        //// Must relock (immediate) to transmit again
+        tagLock.locked_tag_id = -1;
+        tagLock.lock_achieved = false;
+        //// jwc 26-0131-1450 ARCHIVED: 5-second relock message
+        //// Serial.printf("*** [LOCK] 🔄 RESET - must relock 5 sec for next transmission\n");
+        //// jwc 26-0131-1450 NEW: Immediate relock message
+        Serial.printf("*** [LOCK] 🔄 RESET - must relock (immediate) for next transmission\n");
+      }
+      #elif DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+      if (tagLock.lock_achieved) {
+        //// Lock achieved - enqueue for transmission (HTTP/WebSocket still use queue)
+        enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
+                        x_cm, y_cm, z_cm, range_cm);
+        Serial.printf("*** [LOCK] 📤 ENQUEUED tag ID %d for transmission\n", det->id);
+      }
       #endif
   }
   //// jwc o Serial.println("");
@@ -2052,6 +2156,7 @@ if(zarray_size(detections) > 0){
     //// #endif
     
     //// jwc 26-0128-1440 NEW: Protocol-specific transmission (HTTP, WebSocket, or UDP)
+    //// jwc 26-0131-1350 UPDATED: UDP now uses immediate transmission (no queue check needed!)
     #if DEFINE_NETWORK_HTTP_BOOL
     //// HTTP: Stateless POST requests (no persistent connection)
     transmitAprilTagsHTTP();
@@ -2060,8 +2165,8 @@ if(zarray_size(detections) > 0){
     transmitAprilTagsWebSocket();
     webSocket.poll();  // Process WebSocket events
     #elif DEFINE_NETWORK_UDP_BOOL
-    //// UDP: Fire-and-forget packets (ZERO memory leaks expected!)
-    transmitAprilTagsUDP();
+    //// UDP: Immediate transmission (no queue check needed - already sent!)
+    //// transmitAprilTagsUDP();  // ARCHIVED: Queue-based approach (replaced by immediate)
     #endif
     
     vTaskDelay(pdMS_TO_TICKS(1));
