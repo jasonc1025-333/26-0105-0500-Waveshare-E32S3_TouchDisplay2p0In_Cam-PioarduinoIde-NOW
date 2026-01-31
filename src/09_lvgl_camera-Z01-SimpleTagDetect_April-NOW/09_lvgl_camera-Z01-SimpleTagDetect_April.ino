@@ -77,6 +77,13 @@
 #define DEFINE_APRILTAG_16H05 0   // tag16h5: LOW MEMORY - fewer tags (30 IDs)
 #define DEFINE_APRILTAG_36H11 1   // tag36h11: HIGH MEMORY - more tags (587 IDs) - CURRENT
 
+//// jwc 26-0131-0934 NEW: Camera buffer mode selection - default vs downsampled
+//// DEFINE_CAM_BUFFER_240x320_DEFAULT_BOOL: Standard 240×320 buffer (76,800 bytes)
+//// DEFINE_CAM_BUFFER_120x160_REDUCE_HALF_BOOL: Downsampled 120×160 buffer (19,200 bytes)
+//// Set ONE to 1 to enable (only one mode active at a time)
+#define DEFINE_CAM_BUFFER_240x320_DEFAULT_BOOL 1      // Standard resolution (DEFAULT - ON)
+#define DEFINE_CAM_BUFFER_120x160_REDUCE_HALF_BOOL 0  // Half resolution (saves 57,600 bytes)
+
 //// jwc 26-0128-1440 NEW: Triple protocol support - HTTP vs WebSocket vs UDP
 //// jwc 26-0130-0927 TESTING: Enable HTTP to test if it has memory leaks
 //// jwc 26-0130-1000 TESTING: Switch to WebSocket per user request
@@ -1663,6 +1670,10 @@ static void task(void *param) {
     //// jwc 26-0130-2150 ARCHIVED: Previous failure: Tried to declare then assign (assignment operator deleted)
     //// jwc 26-0130-2150 ARCHIVED: New solution: Initialize struct at declaration time (no assignment needed!)
     //// jwc 26-0130-2150 ARCHIVED: Result: AprilTag only detects in visible 240px screen area
+
+    //// jwc 26-0131-0934 NEW: Conditional buffer allocation based on mode selection
+    //// Mode 1: Standard 240×320 buffer (DEFAULT - better detection, more memory)
+    //// Mode 2: Downsampled 120×160 buffer (saves 57,600 bytes, faster detection)
     
     //// Allocate cropped buffer (240×320 = 76,800 bytes) - static so allocated only once
     static uint8_t *cropped_apriltag_buf = NULL;
@@ -1688,14 +1699,15 @@ static void task(void *param) {
       }
     }
     
-    //// jwc 26-0131-0730 NEW: Allocate downsampled buffer (120×160 = 19,200 bytes)
+    #if DEFINE_CAM_BUFFER_120x160_REDUCE_HALF_BOOL
+    //// jwc 26-0131-0934 MODE 2: Downsampled 120×160 buffer (19,200 bytes)
     static uint8_t *downsample_buf = NULL;
     
     if (downsample_buf == NULL) {
-      //// jwc 26-0131-0730 Try PSRAM first (preferred - doesn't consume DRAM)
+      //// Try PSRAM first (preferred - doesn't consume DRAM)
       downsample_buf = (uint8_t *)heap_caps_malloc(120 * 160, MALLOC_CAP_SPIRAM);
       if (!downsample_buf) {
-        //// jwc 26-0131-0730 Fallback to DRAM if PSRAM fails
+        //// Fallback to DRAM if PSRAM fails
         downsample_buf = (uint8_t *)heap_caps_malloc(120 * 160, MALLOC_CAP_INTERNAL);
         if (!downsample_buf) {
           Serial.println("*** ERROR: Failed to allocate downsample buffer!");
@@ -1711,24 +1723,25 @@ static void task(void *param) {
     if (downsample_buf != NULL && cropped_apriltag_buf != NULL) {
       for (int y = 0; y < 160; y++) {
         for (int x = 0; x < 120; x++) {
-          //// jwc 26-0131-0730 Source pixel at (x*2, y*2) in 240×320 cropped image
+          //// Source pixel at (x*2, y*2) in 240×320 cropped image
           downsample_buf[y * 120 + x] = cropped_apriltag_buf[(y * 2) * 240 + (x * 2)];
         }
       }
     }
     
-    //// jwc 26-0131-0730 UPDATED: Use downsampled buffer for AprilTag detection
-    //// Priority: downsampled (120×160) > cropped (240×320) > full (480×320)
-    //// jwc 26-0130-2150 ARCHIVED: Initialize struct at declaration (not assignment!)
-    //// jwc 26-0130-2150 ARCHIVED: This avoids the deleted assignment operator issue
-    image_u8_t im = (downsample_buf != NULL) ? 
+    //// jwc 26-0131-0945 UPDATED: Simplified - only handle downsampled case in MODE 2
+    //// Fallback to MODE 1 logic (cropped → full) is handled by #else block
+    image_u8_t im =  
       (image_u8_t){
         .width = 120,
         .height = 160,
         .stride = 120,
         .buf = downsample_buf
-      } : 
-      (cropped_apriltag_buf != NULL) ? 
+    };
+    #else
+    //// jwc 26-0131-0934 MODE 1: Standard 240×320 buffer (DEFAULT - no downsampling)
+    //// Also serves as fallback if MODE 2 downsampling fails
+    image_u8_t im = (cropped_apriltag_buf != NULL) ? 
       (image_u8_t){
         .width = 240,
         .height = 320,
@@ -1741,6 +1754,7 @@ static void task(void *param) {
         .stride = camera_framebuffer_pic_ObjPtr->width,
         .buf = camera_framebuffer_pic_ObjPtr->buf
       };
+    #endif
 #if DEBUG >= 3
     Serial.println("done");
     Serial.println("Detecting... ");
@@ -2126,8 +2140,15 @@ void print_all_mem_stats(int total_stages) {
 
 void setup() {
   Serial.begin(115200);
-  delay(100);  // Allow serial to stabilize
+  //// jwc26-0131-1100 y delay(100);  // Allow serial to stabilize
+  delay(5000);  // Allow serial to stabilize after 5 sec
   
+  //// jwc 26-0130-2300 UPDATED: Total stages = 10 (BOOT, Serial, LVGL, GFX, Touch, Camera, AprilTag, WiFi, Network, Tasks)
+  const int TOTAL_STAGES = 11;
+
+  //// jwc 26-0130-2200 NEW: Memory snapshot at boot
+  print_mem_stats("PSRAM (before any init)", 0, TOTAL_STAGES);
+
   //// jwc 26-0131-0538 NEW: PSRAM initialization check (Action Plan Step 1)
   //// Check if PSRAM hardware is properly initialized by ESP-IDF bootloader
   Serial.println("\n\n");
@@ -2152,10 +2173,7 @@ void setup() {
   }
   Serial.println("╚════════════════════════════════════════════════════════════════╝");
   Serial.println("\n\n");
-  
-  //// jwc 26-0130-2300 UPDATED: Total stages = 10 (BOOT, Serial, LVGL, GFX, Touch, Camera, AprilTag, WiFi, Network, Tasks)
-  const int TOTAL_STAGES = 10;
-  
+    
   //// jwc 26-0130-2200 NEW: Memory snapshot at boot
   print_mem_stats("BOOT (before any init)", 1, TOTAL_STAGES);
   
