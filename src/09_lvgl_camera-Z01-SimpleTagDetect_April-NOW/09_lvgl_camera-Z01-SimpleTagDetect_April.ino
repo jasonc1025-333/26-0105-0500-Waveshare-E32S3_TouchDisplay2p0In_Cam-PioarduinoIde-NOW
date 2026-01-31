@@ -70,6 +70,13 @@
 //// #include <ArduinoJson.h>
 //// #endif
 
+//// jwc 26-0131-0315 NEW: AprilTag family selection - tag16h5 vs tag36h11
+//// tag16h5: Smaller memory footprint, faster detection, fewer tags (30 unique IDs)
+//// tag36h11: Larger memory footprint, slower detection, more tags (587 unique IDs)
+//// Set ONE to 1 to enable (only one family active at a time)
+#define DEFINE_APRILTAG_16H05 0   // tag16h5: LOW MEMORY - fewer tags (30 IDs)
+#define DEFINE_APRILTAG_36H11 1   // tag36h11: HIGH MEMORY - more tags (587 IDs) - CURRENT
+
 //// jwc 26-0128-1440 NEW: Triple protocol support - HTTP vs WebSocket vs UDP
 //// jwc 26-0130-0927 TESTING: Enable HTTP to test if it has memory leaks
 //// jwc 26-0130-1000 TESTING: Switch to WebSocket per user request
@@ -352,8 +359,14 @@ lv_obj_t *img_camera;
 // any family of your choice. Note that due to memory limitation,
 // you might have to reduce the number of tag in `codedata` array
 // in the tag family source file.
+//// jwc 26-0131-0315 NEW: Conditional includes based on tag family selection
 #include "apriltag.h"
-#include "tag36h11.h"
+#if DEFINE_APRILTAG_16H05
+#include "tag16h5.h"   // Smaller memory footprint (~80 KB less than tag36h11)
+#endif
+#if DEFINE_APRILTAG_36H11
+#include "tag36h11.h"  // Larger memory footprint (current default)
+#endif
 #include "common/image_u8.h"
 #include "common/zarray.h"
 
@@ -435,8 +448,15 @@ Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled
 // >> jwc 25-0407-0000 SimpleTagDetect_April
 //
 
-  // Create tag family object
-  apriltag_family_t *tf = tag36h11_create();
+  //// jwc 26-0131-0315 NEW: Conditional tag family creation based on preprocessor define
+  // Create tag family object (tag16h5 saves ~80 KB compared to tag36h11!)
+  #if DEFINE_APRILTAG_16H05
+  apriltag_family_t *tf = tag16h5_create();   // LOW MEMORY: 30 unique tags, ~80 KB less
+  #elif DEFINE_APRILTAG_36H11
+  apriltag_family_t *tf = tag36h11_create();  // HIGH MEMORY: 587 unique tags (backup)
+  #else
+  #error "Must define either DEFINE_APRILTAG_16H05 or DEFINE_APRILTAG_36H11"
+  #endif
 
   // Create AprilTag detector object
   apriltag_detector_t *td = apriltag_detector_create();
@@ -868,8 +888,9 @@ void transmitAprilTagsWebSocket() {
   //// jwc 26-0127-0735 NEW: Memory monitoring (print every transmission)
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minFreeHeap = ESP.getMinFreeHeap();
+  uint32_t freePsram = ESP.getFreePsram();
   Serial.printf("\n");
-  Serial.printf("*** *** *** [MEM} Free_Dram_Heap: %d b | Free_Psram: %d b | Total WS TX: %d\n", freeHeap, minFreeHeap, total_transmitted_ws);
+  Serial.printf("*** *** *** [MEM} Free_Dram_Heap: %d b | Free_Psram: %d b | Total WS TX: %d\n", freeHeap, freePsram, total_transmitted_ws);
   Serial.printf("\n");
 
   //// jwc 26-0127-2100 y //// jwc 26-0127-0735 WARNING: Low memory detection
@@ -974,6 +995,7 @@ void transmitAprilTagsWebSocket() {
 //// jwc 26-0130-1045 NEW: UDP transmission function (stateless, zero memory leaks!)
 //// UDP is fire-and-forget: no connection, no handshake, no TIME_WAIT state
 //// Expected result: ZERO memory leaks (no TCP buffers, no socket state)
+//// jwc 26-0131-0200 UPDATED: Added UDP receive for server acknowledgments
 
 static int total_transmitted_udp = 0;  // Track total UDP packets sent
 WiFiUDP udp;  // UDP client object
@@ -989,10 +1011,11 @@ void transmitAprilTagsUDP() {
   //// Color-coded memory monitoring
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minFreeHeap = ESP.getMinFreeHeap();
+  uint32_t freePsram = ESP.getFreePsram();
   Serial.printf("\n");
   
   //// BLUE for all memory levels (user request: print only in blue font-color)
-  Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_udp);
+  Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_udp);
   Serial.printf("\n");
   
   // Check if WiFi is connected
@@ -1039,10 +1062,48 @@ void transmitAprilTagsUDP() {
         //// Color-coded status reporting
         if (result == 1) {
           //// GREEN for success (packet sent)
-          Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: UDP SUCCESS: %s\033[0m\n", jsonBuffer);
+          Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: UDP TX SUCCESS: %s\033[0m\n", jsonBuffer);
+          
+          //// jwc 26-0131-0210 NEW: Wait for UDP ACK from server (with timeout)
+          unsigned long ack_start = millis();
+          const unsigned long ACK_TIMEOUT = 500;  // 500ms timeout
+          
+          while (millis() - ack_start < ACK_TIMEOUT) {
+            int packetSize = udp.parsePacket();
+            if (packetSize > 0) {
+              // Received UDP response from server
+              char ackBuffer[256];
+              int len = udp.read(ackBuffer, sizeof(ackBuffer) - 1);
+              if (len > 0) {
+                ackBuffer[len] = '\0';  // Null-terminate
+                
+                // Parse JSON ACK
+                StaticJsonDocument<256> ackDoc;
+                DeserializationError error = deserializeJson(ackDoc, ackBuffer);
+                
+                if (!error) {
+                  const char* event = ackDoc["event"];
+                  const char* status = ackDoc["status"];
+                  int ack_tag_id = ackDoc["tag_id"];
+                  
+                  // Print ACK with tag_id confirmation
+                  Serial.printf("\033[36m*** ✅ Esp32 <<-- SvHub: UDP ACK received | tag_id=%d, status=%s\033[0m\n", 
+                                ack_tag_id, status ? status : "unknown");
+                } else {
+                  Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK parse error: %s\033[0m\n", ackBuffer);
+                }
+              }
+              break;  // Got response, exit wait loop
+            }
+            delay(10);  // Small delay before checking again
+          }
+          
+          if (millis() - ack_start >= ACK_TIMEOUT) {
+            Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK timeout (no response)\033[0m\n");
+          }
         } else {
           //// RED for failure
-          Serial.printf("\033[31m*** ❌ Esp32 <<-- SvHub: UDP FAILED: %s\033[0m\n", jsonBuffer);
+          Serial.printf("\033[31m*** ❌ Esp32 -->> SvHub: UDP TX FAILED: %s\033[0m\n", jsonBuffer);
         }
         
         queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
@@ -1084,19 +1145,20 @@ void transmitAprilTagsHTTP() {
   //// jwc 26-0129-0710 UPDATED: Color-coded memory monitoring
   uint32_t freeHeap = ESP.getFreeHeap();
   uint32_t minFreeHeap = ESP.getMinFreeHeap();
+  uint32_t freePsram = ESP.getFreePsram();
   Serial.printf("\n");
   
   //// Color-code based on memory level
   //// jwc 26-0129-0950 UPDATED: Replace green (32m) with cyan (36m) - green not working in terminal
   if (freeHeap < 10000) {
     //// RED for critical (< 10KB)
-    Serial.printf("\033[31m*** *** *** [MEM] CRITICAL: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
+    Serial.printf("\033[31m*** *** *** [MEM] CRITICAL: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_http);
   } else if (freeHeap < 15000) {
     //// YELLOW for warning (10-15KB)
-    Serial.printf("\033[33m*** *** *** [MEM] WARNING: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
+    Serial.printf("\033[33m*** *** *** [MEM] WARNING: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_http);
   } else {
     //// CYAN for OK (> 15KB) - green (32m) not working, using cyan (36m) instead
-    Serial.printf("\033[36m*** *** *** [MEM] OK: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_http);
+    Serial.printf("\033[36m*** *** *** [MEM] OK: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_http);
   }
   Serial.printf("\n");
   
@@ -1593,10 +1655,14 @@ static void task(void *param) {
     //// jwc 26-0124-2200 ARCHIVED: 
     //// jwc 26-0124-2200 ARCHIVED: skip_downsample:
     
-    //// jwc 26-0130-2150 NEW APPROACH: Cropped AprilTag buffer (initialize at declaration!)
-    //// Previous failure: Tried to declare then assign (assignment operator deleted)
-    //// New solution: Initialize struct at declaration time (no assignment needed!)
-    //// Result: AprilTag only detects in visible 240px screen area
+    //// jwc 26-0131-0730 NEW: Downsampling 240×320 → 120×160 for AprilTag processing
+    //// Display stays full resolution (240×320), but AprilTag processes 4× fewer pixels
+    //// Strategy: Take every 2nd pixel in both X and Y directions
+    //// Benefits: 4× faster detection, ~40% less memory usage in AprilTag library
+    //// jwc 26-0130-2150 ARCHIVED: Cropped buffer only (240×320 = 76,800 bytes)
+    //// jwc 26-0130-2150 ARCHIVED: Previous failure: Tried to declare then assign (assignment operator deleted)
+    //// jwc 26-0130-2150 ARCHIVED: New solution: Initialize struct at declaration time (no assignment needed!)
+    //// jwc 26-0130-2150 ARCHIVED: Result: AprilTag only detects in visible 240px screen area
     
     //// Allocate cropped buffer (240×320 = 76,800 bytes) - static so allocated only once
     static uint8_t *cropped_apriltag_buf = NULL;
@@ -1615,16 +1681,54 @@ static void task(void *param) {
       uint8_t *src = camera_framebuffer_pic_ObjPtr->buf;
       for (int y = 0; y < 320; y++) {
         for (int x = 0; x < 240; x++) {
-          // Source: skip first 120px, take next 240px (center crop)
+          //// jwc 26-0130-2150 Source: skip first 120px, take next 240px (center crop)
           int src_idx = y * 480 + (x + 120);
           cropped_apriltag_buf[y * 240 + x] = src[src_idx];
         }
       }
     }
     
-    //// jwc 26-0130-2150 CRITICAL: Initialize struct at declaration (not assignment!)
-    //// This avoids the deleted assignment operator issue
-    image_u8_t im = (cropped_apriltag_buf != NULL) ? 
+    //// jwc 26-0131-0730 NEW: Allocate downsampled buffer (120×160 = 19,200 bytes)
+    static uint8_t *downsample_buf = NULL;
+    
+    if (downsample_buf == NULL) {
+      //// jwc 26-0131-0730 Try PSRAM first (preferred - doesn't consume DRAM)
+      downsample_buf = (uint8_t *)heap_caps_malloc(120 * 160, MALLOC_CAP_SPIRAM);
+      if (!downsample_buf) {
+        //// jwc 26-0131-0730 Fallback to DRAM if PSRAM fails
+        downsample_buf = (uint8_t *)heap_caps_malloc(120 * 160, MALLOC_CAP_INTERNAL);
+        if (!downsample_buf) {
+          Serial.println("*** ERROR: Failed to allocate downsample buffer!");
+        } else {
+          Serial.println("*** Downsample buffer allocated in DRAM (120×160) - PSRAM failed");
+        }
+      } else {
+        Serial.println("*** Downsample buffer allocated in PSRAM (120×160)");
+      }
+    }
+    
+    //// jwc 26-0131-0730 NEW: Downsample 240×320 → 120×160 (take every 2nd pixel)
+    if (downsample_buf != NULL && cropped_apriltag_buf != NULL) {
+      for (int y = 0; y < 160; y++) {
+        for (int x = 0; x < 120; x++) {
+          //// jwc 26-0131-0730 Source pixel at (x*2, y*2) in 240×320 cropped image
+          downsample_buf[y * 120 + x] = cropped_apriltag_buf[(y * 2) * 240 + (x * 2)];
+        }
+      }
+    }
+    
+    //// jwc 26-0131-0730 UPDATED: Use downsampled buffer for AprilTag detection
+    //// Priority: downsampled (120×160) > cropped (240×320) > full (480×320)
+    //// jwc 26-0130-2150 ARCHIVED: Initialize struct at declaration (not assignment!)
+    //// jwc 26-0130-2150 ARCHIVED: This avoids the deleted assignment operator issue
+    image_u8_t im = (downsample_buf != NULL) ? 
+      (image_u8_t){
+        .width = 120,
+        .height = 160,
+        .stride = 120,
+        .buf = downsample_buf
+      } : 
+      (cropped_apriltag_buf != NULL) ? 
       (image_u8_t){
         .width = 240,
         .height = 320,
@@ -1958,8 +2062,102 @@ if(zarray_size(detections) > 0){
 
 
 
+//// jwc 26-0130-2200 NEW: Memory debug print helper (ORANGE font for visibility)
+//// jwc 26-0130-2300 UPDATED: Added stage counter (e.g., "Stage 1 of 10: BOOT")
+//// jwc 26-0130-2320 CRITICAL FIX: Store stats in array, print all at end of setup()
+//// Problem: Early stages (BOOT, Serial, LVGL) print before Serial fully initialized
+//// Solution: Buffer all stats, print once Serial is stable (after GFX init)
+
+#define MAX_MEM_STAGES 10
+struct MemStage {
+  char name[40];
+  int stage_num;
+  uint32_t free_dram;
+  uint32_t free_psram;
+  uint32_t min_dram;
+  uint32_t total_dram;
+  uint32_t total_psram;
+};
+
+static MemStage mem_stages[MAX_MEM_STAGES];
+static int mem_stage_count = 0;
+
+void print_mem_stats(const char* stage, int stage_num, int total_stages) {
+  //// Store stats in array (don't print yet)
+  if (mem_stage_count < MAX_MEM_STAGES) {
+    strncpy(mem_stages[mem_stage_count].name, stage, sizeof(mem_stages[mem_stage_count].name) - 1);
+    mem_stages[mem_stage_count].stage_num = stage_num;
+    mem_stages[mem_stage_count].free_dram = ESP.getFreeHeap();
+    mem_stages[mem_stage_count].free_psram = ESP.getFreePsram();
+    mem_stages[mem_stage_count].min_dram = ESP.getMinFreeHeap();
+    mem_stages[mem_stage_count].total_dram = ESP.getHeapSize();
+    mem_stages[mem_stage_count].total_psram = ESP.getPsramSize();
+    mem_stage_count++;
+  }
+}
+
+//// jwc 26-0130-2320 NEW: Print all buffered memory stats at once
+void print_all_mem_stats(int total_stages) {
+  Serial.printf("\n\n");
+  Serial.printf("\033[38;5;208m");  // ORANGE
+  Serial.printf("╔════════════════════════════════════════════════════════════════╗\n");
+  Serial.printf("║          MEMORY DEBUG REPORT - ALL SETUP STAGES                ║\n");
+  Serial.printf("╚════════════════════════════════════════════════════════════════╝\n");
+  Serial.printf("\033[0m");
+  
+  for (int i = 0; i < mem_stage_count; i++) {
+    MemStage* s = &mem_stages[i];
+    uint32_t used_dram = s->total_dram - s->free_dram;
+    uint32_t used_psram = s->total_psram - s->free_psram;
+    
+    Serial.printf("\033[38;5;208m");  // ORANGE
+    Serial.printf("╔════════════════════════════════════════════════════════════════╗\n");
+    Serial.printf("║ [MEM_DEBUG] Stage %2d of %2d: %-33s ║\n", s->stage_num, total_stages, s->name);
+    Serial.printf("╠════════════════════════════════════════════════════════════════╣\n");
+    Serial.printf("║ DRAM:  Free=%7d b | Min=%7d b | Total=%7d b    ║\n", s->free_dram, s->min_dram, s->total_dram);
+    Serial.printf("║ PSRAM: Free=%7d b | Total=%7d b                    ║\n", s->free_psram, s->total_psram);
+    Serial.printf("║ Used:  DRAM=%7d b | PSRAM=%7d b                    ║\n", used_dram, used_psram);
+    Serial.printf("╚════════════════════════════════════════════════════════════════╝\n");
+    Serial.printf("\033[0m");
+  }
+  
+  Serial.printf("\n\n");
+}
+
 void setup() {
   Serial.begin(115200);
+  delay(100);  // Allow serial to stabilize
+  
+  //// jwc 26-0131-0538 NEW: PSRAM initialization check (Action Plan Step 1)
+  //// Check if PSRAM hardware is properly initialized by ESP-IDF bootloader
+  Serial.println("\n\n");
+  Serial.println("╔════════════════════════════════════════════════════════════════╗");
+  Serial.println("║          PSRAM INITIALIZATION CHECK (Action Plan 1)           ║");
+  Serial.println("╚════════════════════════════════════════════════════════════════╝");
+  
+  if (psramInit()) {
+    Serial.println("✅ PSRAM initialized successfully!");
+    Serial.printf("   PSRAM size: %d bytes (%.2f MB)\n", ESP.getPsramSize(), ESP.getPsramSize() / 1048576.0);
+    Serial.printf("   Free PSRAM: %d bytes (%.2f MB)\n", ESP.getFreePsram(), ESP.getFreePsram() / 1048576.0);
+    Serial.println("   ✅ Downsampling plan is SAFE (can use PSRAM for buffers)");
+  } else {
+    Serial.println("❌ PSRAM initialization FAILED!");
+    Serial.println("   Possible causes:");
+    Serial.println("   1. Wrong board_build.psram_type in platformio.ini");
+    Serial.println("      Current: qio_opi (Octal PSRAM)");
+    Serial.println("      Try: qio_qspi (Quad PSRAM) - more compatible");
+    Serial.println("   2. Hardware defect (rare)");
+    Serial.println("   3. Power supply issue (PSRAM needs stable 3.3V)");
+    Serial.println("   ⚠️ Downsampling plan NOT SAFE (would consume all DRAM)");
+  }
+  Serial.println("╚════════════════════════════════════════════════════════════════╝");
+  Serial.println("\n\n");
+  
+  //// jwc 26-0130-2300 UPDATED: Total stages = 10 (BOOT, Serial, LVGL, GFX, Touch, Camera, AprilTag, WiFi, Network, Tasks)
+  const int TOTAL_STAGES = 10;
+  
+  //// jwc 26-0130-2200 NEW: Memory snapshot at boot
+  print_mem_stats("BOOT (before any init)", 1, TOTAL_STAGES);
   
   //// jwc 26-0109-1200 ARCHIVED: Simple Serial1 initialization (moved to Serial_Comms)
   //// Serial1.begin(115200, SERIAL_8N1, 48, 47); // RX=48, TX=47
@@ -1968,8 +2166,11 @@ void setup() {
   //// jwc 26-0109-1200 NEW: Initialize robust serial communications
   //// GPIO 17 (TX) / GPIO 18 (RX) - No boot messages, proper buffering
   Serial_Comms_Init();
+  print_mem_stats("SERIAL_COMMS initialized", 2, TOTAL_STAGES);
   
   lvgl_api_mux = xSemaphoreCreateRecursiveMutex();
+  print_mem_stats("LVGL mutex created", 3, TOTAL_STAGES);
+  
   // Serial.setDebugOutput(true);
   // while(!Serial);
   Serial.println("Arduino_GFX LVGL_Arduino_v8 example ");
@@ -1985,6 +2186,7 @@ void setup() {
     Serial.println("gfx->begin() failed!");
   }
   gfx->fillScreen(BLACK);
+  print_mem_stats("GFX display initialized", 4, TOTAL_STAGES);
 
 #ifdef EXAMPLE_PIN_NUM_LCD_BL
   //// jwc 26-0105-2030 PlatformIO Arduino ESP32 3.2.0 uses older LEDC API
@@ -2000,7 +2202,10 @@ void setup() {
   // touch_init(gfx->width(), gfx->height(), gfx->getRotation());
   Wire.begin(EXAMPLE_PIN_NUM_TP_SDA, EXAMPLE_PIN_NUM_TP_SCL);
   bsp_touch_init(&Wire, gfx->getRotation(), gfx->width(), gfx->height());
+  print_mem_stats("Touch initialized", 5, TOTAL_STAGES);
+  
   lv_init();
+  print_mem_stats("LVGL init", 6, TOTAL_STAGES);
 
 #if LV_USE_LOG != 0
   lv_log_register_print_cb(my_print); /* register print function for debugging */
@@ -2091,6 +2296,8 @@ void setup() {
   //// jwc yy 25-0408-1930 no improvement: td->quad_sigma = 1.0;
   td->quad_sigma = 0.0;
 
+  //// jwc 26-0131-0620 REVERTED: Back to 4.0 (6.0 didn't save 40% DRAM as expected)
+  //// User feedback: quad_decimate doesn't directly save DRAM, use downsampling instead
   td->quad_decimate = 4.0;
   td->refine_edges = 0;
 
@@ -2113,9 +2320,16 @@ void setup() {
   Serial.println("done");
   //// jwc o Serial.print("Memory available in PSRAM: ");
   //// jwc o Serial.println(ESP.getFreePsram());
+  //// jwc 26-0131-0315 NEW: Print which tag family is active
+  #if DEFINE_APRILTAG_16H05
+  Serial.println("*** AprilTag family: tag16h5 (LOW MEMORY - 30 tags)");
+  #elif DEFINE_APRILTAG_36H11
+  Serial.println("*** AprilTag family: tag36h11 (HIGH MEMORY - 587 tags) - CURRENT");
+  #endif
   Serial.println("Start AprilTag detecting...");
 #endif
 
+  print_mem_stats("AprilTag detector configured", 7, TOTAL_STAGES);
 
   //// jwc 26-0128-1440 ARCHIVED: Old DEFINE_NETWORKING_BOOL guard (WebSocket only)
   //// #if DEFINE_NETWORKING_BOOL
@@ -2156,6 +2370,7 @@ void setup() {
   #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
   //// jwc 26-0124-1030 PHASE 7: Initialize WiFi (common for all protocols)
   initWiFi();
+  print_mem_stats("WiFi connected", 8, TOTAL_STAGES);
   
   //// jwc 26-0129-0750 CRITICAL FIX #1: Disable WiFi sleep mode to prevent memory leak
   //// WiFi power management causes TCP stack to reallocate buffers on wake (~160 bytes/TX leak)
@@ -2205,10 +2420,15 @@ void setup() {
   }
   #endif
   
+  print_mem_stats("Network protocol initialized", 9, TOTAL_STAGES);
+  
   #else
   Serial.println("*** NETWORKING DISABLED - AprilTag-only mode for memory leak testing");
   #endif
 
+  //// jwc 26-0130-2320 NEW: Print all buffered memory stats now that Serial is stable
+  print_all_mem_stats(TOTAL_STAGES);
+  
   Serial.println("Setup done");
 
   //// jwc 25-0408-1920 try simpletagdetect runtime approach: xTaskCreatePinnedToCore(
@@ -2248,6 +2468,8 @@ void setup() {
     1,
     NULL,
     1);  // Core 1: Serial communications
+
+  print_mem_stats("Tasks created (Camera+Serial)", 10, TOTAL_STAGES);
 
 }
 
@@ -2304,10 +2526,9 @@ void loop() {
     
     Serial.printf("\n");
     //// YELLOW for loop() memory monitoring (user request: print in yellow font-color)
-    Serial.printf("\033[33m[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\033[0m\n", 
+    Serial.printf("\033[33m[MEM] DRAM: %d b | PSRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\033[0m\n", 
                   current_heap, 
                   ESP.getFreePsram(),
-                  ESP.getMinFreeHeap(),
                   total_detections,
                   mem_loss_per_detect);
     Serial.printf("\n");

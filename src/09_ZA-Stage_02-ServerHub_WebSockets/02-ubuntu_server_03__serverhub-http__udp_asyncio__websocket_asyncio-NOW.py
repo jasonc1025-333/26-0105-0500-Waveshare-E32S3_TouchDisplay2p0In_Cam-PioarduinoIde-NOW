@@ -159,7 +159,7 @@ async def broadcast_to_gdevelop(message_dict):
     data_info = ""
     if event_name == 'apriltag_data':
         data_info = f" tag_id={message_dict.get('tag_id', 0)}, x={message_dict.get('x_cm', 0):.1f}, y={message_dict.get('y_cm', 0):.1f}, z={message_dict.get('z_cm', 0):.1f}"
-    print(f"*** SvHub -->> GDeve: ({len(websocket_clients['gdevelop'])} clients) Event={event_name},{data_info}")
+    print(f"*** ..... .... SvHub -->> GDeve: ({len(websocket_clients['gdevelop'])} clients) Event={event_name},{data_info}")
     
     # Broadcast to all GDevelop clients
     disconnected = set()
@@ -193,7 +193,7 @@ async def handle_esp32_message(ws, message):
                     'error': error_msg,
                     'message': 'Authentication required - check your auth_token'
                 }
-                print(f"*** SvHub <<-- Esp32: identify (AUTH FAILED: {error_msg})")
+                print(f"*** Esp32 -->> SvHub .... .....: identify (AUTH FAILED: {error_msg})")
                 await ws.send(json.dumps(auth_fail_msg))
                 return  # Don't add to clients list
             
@@ -204,7 +204,7 @@ async def handle_esp32_message(ws, message):
             esp32_name = data.get('data', {}).get('camera_name', 'ESP32-Unknown')
             
             identify_success_msg = {'event': 'identify_success', 'client_type': 'esp32'}
-            print(f"*** SvHub <<-- Esp32: identify | 📹 ESP32 CLIENT IDENTIFIED ✅ Camera={esp32_name}, Auth=PASSED, ESP32_Clients={len(websocket_clients['esp32'])}")
+            print(f"*** Esp32 -->> SvHub .... .....: identify | 📹 ESP32 CLIENT IDENTIFIED ✅ Camera={esp32_name}, Auth=PASSED, ESP32_Clients={len(websocket_clients['esp32'])}")
             await ws.send(json.dumps(identify_success_msg))
             
         elif event == 'apriltag_data':
@@ -450,7 +450,21 @@ class UDPProtocol(asyncio.DatagramProtocol):
             # Schedule async broadcast (run in event loop)
             asyncio.create_task(broadcast_to_gdevelop(broadcast_message))
             
-            print(f"*** SvHub <<-- Esp32: UDP packet | 📡 ID={apriltag_data.get('tag_id')}, Pos=({apriltag_data.get('x_cm', 0):.1f},{apriltag_data.get('y_cm', 0):.1f},{apriltag_data.get('z_cm', 0):.1f})cm | From={addr[0]}:{addr[1]} | GDevelop_clients={stats['gdevelop_clients']}")
+            print(f"*** Esp32 -->> SvHub .... .....: UDP packet | 📡 ID={apriltag_data.get('tag_id')}, Pos=({apriltag_data.get('x_cm', 0):.1f},{apriltag_data.get('y_cm', 0):.1f},{apriltag_data.get('z_cm', 0):.1f})cm | From={addr[0]}:{addr[1]} | GDevelop_clients={stats['gdevelop_clients']}")
+            
+            #### jwc 26-0131-0030 NEW: Send UDP acknowledgment back to ESP32
+            # Create acknowledgment message (JSON)
+            ack_message = {
+                'event': 'apriltag_ack',
+                'status': 'received',
+                'tag_id': apriltag_data.get('tag_id'),
+                'server_timestamp': time.time()
+            }
+            ack_json = json.dumps(ack_message).encode('utf-8')
+            
+            # Send UDP response back to ESP32
+            self.transport.sendto(ack_json, addr)
+            print(f"*** Esp32 <<-- SvHub .... .....: UDP ACK sent to {addr[0]}:{addr[1]}")
             
         except json.JSONDecodeError as e:
             print(f"❌ Invalid JSON in UDP packet from {addr[0]}: {e}")
