@@ -70,17 +70,24 @@
 //// #include <ArduinoJson.h>
 //// #endif
 
-//// jwc 26-0128-1440 NEW: Dual protocol support - HTTP vs WebSocket
+//// jwc 26-0128-1440 NEW: Triple protocol support - HTTP vs WebSocket vs UDP
 //// jwc 26-0130-0927 TESTING: Enable HTTP to test if it has memory leaks
 //// jwc 26-0130-1000 TESTING: Switch to WebSocket per user request
-//// Set one to 1 to enable (test HTTP as alternative to leaky WebSocket)
+//// jwc 26-0130-1035 NEW: UDP protocol (stateless, zero memory leaks expected!)
+//// Set ONE to 1 to enable (only one protocol active at a time)
 #define DEFINE_NETWORK_HTTP_BOOL 0        // HTTP POST protocol (stateless, simpler)
-#define DEFINE_NETWORK_WEBSOCKET_BOOL 1   // WebSocket protocol - TESTING NOW
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 0   // WebSocket protocol (MEMORY LEAK: 195 bytes/detect)
+#define DEFINE_NETWORK_UDP_BOOL 1         // UDP protocol (fire-and-forget, BEST for memory!)
 
-#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
 //// jwc 26-0124-1030 PHASE 1: WiFi includes + configuration
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#endif
+
+#if DEFINE_NETWORK_UDP_BOOL
+//// jwc 26-0130-1035 NEW: UDP protocol (stateless, fire-and-forget, zero memory leaks!)
+#include <WiFiUdp.h>
 #endif
 
 #if DEFINE_NETWORK_HTTP_BOOL
@@ -152,8 +159,8 @@
 //// const unsigned long TRANSMIT_INTERVAL = 1000; // Send every 1 second
 //// #endif
 
-//// jwc 26-0128-1440 NEW: Protocol-agnostic server config (works for both HTTP and WebSocket)
-#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+//// jwc 26-0128-1440 NEW: Protocol-agnostic server config (works for HTTP, WebSocket, and UDP)
+#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
 //// jwc 26-0124-1030 WiFi credentials (update these for your network)
 const char* ssid = "Chan-Comcast";
 const char* password = "Jesus333!";
@@ -161,9 +168,10 @@ const char* password = "Jesus333!";
 //// jwc 26-0124-1240 Authentication token (must match server)
 const char* AUTH_TOKEN = "Jesus333!!!";
 
-//// jwc 26-0129-0628 CRITICAL FIX: Separate ports for HTTP vs WebSocket
+//// jwc 26-0129-0628 CRITICAL FIX: Separate ports for HTTP vs WebSocket vs UDP
 //// HTTP server (Flask) runs on port 5000
 //// WebSocket server runs on port 5100
+//// UDP server runs on port 5200
 const char* server_host = "10.0.0.90";   // Server IP (local network): Win:Hp-Zbook
 
 #if DEFINE_NETWORK_HTTP_BOOL
@@ -172,6 +180,10 @@ const uint16_t server_port = 5000;       // HTTP server port (Flask)
 
 #if DEFINE_NETWORK_WEBSOCKET_BOOL
 const uint16_t server_port = 5100;       // WebSocket server port
+#endif
+
+#if DEFINE_NETWORK_UDP_BOOL
+const uint16_t server_port = 5200;       // UDP server port
 #endif
 
 //// jwc 26-0124-1030 PHASE 2: AprilTag data queue & timing (protocol-agnostic)
@@ -386,13 +398,15 @@ Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled
 //// #define FY 480.0 // fy (in pixel) - estimated (square pixels)
 //// #define CX 240.0 // cx (in pixel) - center of 480px width
 //// #define CY 160.0 // cy (in pixel) - center of 320px height
-//// jwc 26-0125-0720 NEW: Fixed calibration for HVGA 480x320 (corrects AprilTag position offset)
-//// Previous CX=240.0 was correct but FX/FY were too large, causing detection issues
-//// Scaled from Lilygo's proven 240x240 calibration (FX=200, FY=200, CX=120, CY=120)
-//// For 480x320: FX=400 (2× for 2× width), FY=266.7 (scaled for height), CX=240 (center), CY=160 (center)
+//// jwc 26-0130-1825 REVERTED: CX=720.0 caused 1 screen-width RIGHT offset (user correction)
+//// User feedback: "AprilTag detected 1 screen-width extra to the RIGHT"
+//// Conclusion: Original CX=240.0 was CORRECT (geometric center is optical center)
+//// jwc 26-0130-1815 ARCHIVED: CX=720.0 (caused right offset - too far!)
+//// #define CX 720.0 // cx (in pixel) - shifted right by 480px (WRONG - caused right offset!)
+//// jwc 26-0125-0720 RESTORED: Original calibration (CX=240.0 is correct)
 #define FX 400.0 // fx (in pixel) - scaled for 480px width (2× Lilygo's 200.0)
 #define FY 266.7 // fy (in pixel) - scaled for 320px height (200.0 * 320/240)
-#define CX 240.0 // cx (in pixel) - center of 480px width (correct)
+#define CX 240.0 // cx (in pixel) - center of 480px width (CORRECT - geometric center)
 #define CY 160.0 // cy (in pixel) - center of 320px height (correct)
 
 
@@ -688,8 +702,8 @@ void draw_hud_overlay() {
 ////   }
 //// }
 
-//// jwc 26-0128-1440 NEW: Protocol-agnostic WiFi initialization (works for both HTTP and WebSocket)
-#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+//// jwc 26-0128-1440 NEW: Protocol-agnostic WiFi initialization (works for HTTP, WebSocket, and UDP)
+#if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
 //// jwc 26-0124-1030 PHASE 4: WiFi initialization function
 void initWiFi() {
   Serial.println("*** Initializing WiFi...");
@@ -955,6 +969,103 @@ void transmitAprilTagsWebSocket() {
 }
 #endif
 
+
+#if DEFINE_NETWORK_UDP_BOOL
+//// jwc 26-0130-1045 NEW: UDP transmission function (stateless, zero memory leaks!)
+//// UDP is fire-and-forget: no connection, no handshake, no TIME_WAIT state
+//// Expected result: ZERO memory leaks (no TCP buffers, no socket state)
+
+static int total_transmitted_udp = 0;  // Track total UDP packets sent
+WiFiUDP udp;  // UDP client object
+
+void transmitAprilTagsUDP() {
+  unsigned long currentTime = millis();
+  
+  // Check if it's time to transmit
+  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
+    return;
+  }
+  
+  //// Color-coded memory monitoring
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t minFreeHeap = ESP.getMinFreeHeap();
+  Serial.printf("\n");
+  
+  //// BLUE for all memory levels (user request: print only in blue font-color)
+  Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", freeHeap, minFreeHeap, total_transmitted_udp);
+  Serial.printf("\n");
+  
+  // Check if WiFi is connected
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("*** WiFi not connected, skipping transmission");
+    return;
+  }
+  
+  // Check if queue has data
+  if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (queueCount > 0) {
+      // Send each tag as individual UDP packet
+      int transmitted = 0;
+      while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
+        // Create JSON document for single tag (STACK-ALLOCATED - no heap leak!)
+        StaticJsonDocument<512> doc;
+        doc["tag_id"] = tagQueue[queueHead].id;
+        doc["decision_margin"] = round(tagQueue[queueHead].decision_margin * 10.0) / 10.0;
+        doc["yaw"] = round(tagQueue[queueHead].yaw * 10.0) / 10.0;
+        doc["pitch"] = round(tagQueue[queueHead].pitch * 10.0) / 10.0;
+        doc["roll"] = round(tagQueue[queueHead].roll * 10.0) / 10.0;
+        doc["x_cm"] = round(tagQueue[queueHead].x * 10.0) / 10.0;
+        doc["y_cm"] = round(tagQueue[queueHead].y * 10.0) / 10.0;
+        doc["z_cm"] = round(tagQueue[queueHead].z * 10.0) / 10.0;
+        doc["range_cm"] = round(tagQueue[queueHead].range * 10.0) / 10.0;
+        doc["timestamp"] = tagQueue[queueHead].timestamp;
+        doc["camera_name"] = "Waveshare-ESP32-S3";
+        
+        // Add IP address (stack-allocated buffer)
+        char ipBuffer[16];
+        IPAddress ip = WiFi.localIP();
+        snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+        doc["smartcam_ip"] = ipBuffer;
+        
+        // Serialize JSON to stack buffer
+        char jsonBuffer[512];
+        serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+        
+        //// UDP transmission (fire-and-forget, no response expected)
+        udp.beginPacket(server_host, server_port);
+        udp.write((const uint8_t*)jsonBuffer, strlen(jsonBuffer));
+        int result = udp.endPacket();
+        
+        //// Color-coded status reporting
+        if (result == 1) {
+          //// GREEN for success (packet sent)
+          Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: UDP SUCCESS: %s\033[0m\n", jsonBuffer);
+        } else {
+          //// RED for failure
+          Serial.printf("\033[31m*** ❌ Esp32 <<-- SvHub: UDP FAILED: %s\033[0m\n", jsonBuffer);
+        }
+        
+        queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
+        queueCount--;
+        transmitted++;
+      }
+      
+      total_transmitted_udp += transmitted;
+      
+      Serial.printf("*** Esp32 -->> SvHub: Sent %d tags via UDP\n", transmitted);
+      lastTransmitTime = currentTime;
+      
+      // Clear queue after transmission
+      queueHead = 0;
+      queueTail = 0;
+      queueCount = 0;
+      memset(tagQueue, 0, sizeof(tagQueue));
+      Serial.println("*** Queue cleared after transmission");
+    }
+    xSemaphoreGive(queueMutex);
+  }
+}
+#endif
 
 #if DEFINE_NETWORK_HTTP_BOOL
 
@@ -1335,12 +1446,22 @@ static void task(void *param) {
       //// BUT we need grayscale→RGB565 conversion, so we MUST use our rgb565_buf.
       //// The issue might be that we're returning the camera buffer before LVGL renders it!
       
-      //// jwc 26-0105-2120 Convert grayscale to RGB565 for display
+      //// jwc 26-0130-1900 CRITICAL FIX: Crop camera image to center 240px (pixels 120-359)
+      //// Camera captures 480×320, but screen is only 240×320 (portrait)
+      //// Problem: Screen was showing LEFT HALF (pixels 0-239), camera center at right edge
+      //// Solution: Extract CENTER 240px (pixels 120-359) so camera center aligns with screen center
+      //// Result: AprilTag coordinates will match screen position perfectly!
       uint8_t *gray_buf = camera_framebuffer_pic_ObjPtr->buf;
-      for (int i = 0; i < 480 * 320; i++) {
-        uint8_t gray = gray_buf[i];
-        // Convert grayscale to RGB565: R5G6B5
-        rgb565_buf[i] = ((gray & 0xF8) << 8) | ((gray & 0xFC) << 3) | (gray >> 3);
+      for (int y = 0; y < 320; y++) {
+        for (int x = 0; x < 240; x++) {
+          // Source pixel: skip first 120px, take next 240px (center crop)
+          int src_idx = y * 480 + (x + 120);  // Offset by 120px to get center
+          uint8_t gray = gray_buf[src_idx];
+          // Destination pixel: 240×320 screen
+          int dst_idx = y * 240 + x;
+          // Convert grayscale to RGB565: R5G6B5
+          rgb565_buf[dst_idx] = ((gray & 0xF8) << 8) | ((gray & 0xFC) << 3) | (gray >> 3);
+        }
       }
       
       //// jwc 26-0127-2140 REVERTED: Cannot free camera buffer here - AprilTag detector needs it!
@@ -1360,7 +1481,10 @@ static void task(void *param) {
       
       //// jwc 26-0106-0140 NEW SIMPLE APPROACH: Draw directly to screen using GFX!
       //// Bypass LVGL entirely - much simpler and proven to work
-      gfx->draw16bitRGBBitmap(0, 0, rgb565_buf, 480, 320);
+      //// jwc 26-0130-2040 ARCHIVED: gfx->draw16bitRGBBitmap(0, 0, rgb565_buf, 480, 320);
+      //// jwc 26-0130-2040 CRITICAL FIX: Width parameter must match buffer width (240px, not 480px!)
+      //// Buffer is 240×320 after center crop, so draw call must use 240 as width parameter
+      gfx->draw16bitRGBBitmap(0, 0, rgb565_buf, 240, 320);
       #if DEBUG_PRINT_CAM
       Serial.println("*** Image drawn to screen via GFX");
       #endif
@@ -1469,13 +1593,50 @@ static void task(void *param) {
     //// jwc 26-0124-2200 ARCHIVED: 
     //// jwc 26-0124-2200 ARCHIVED: skip_downsample:
     
-    //// jwc 26-0124-2200 NEW: Use full resolution for AprilTag processing (slower but works)
-    image_u8_t im = {
-      .width = camera_framebuffer_pic_ObjPtr->width,
-      .height = camera_framebuffer_pic_ObjPtr->height,
-      .stride = camera_framebuffer_pic_ObjPtr->width,
-      .buf = camera_framebuffer_pic_ObjPtr->buf
-    };
+    //// jwc 26-0130-2150 NEW APPROACH: Cropped AprilTag buffer (initialize at declaration!)
+    //// Previous failure: Tried to declare then assign (assignment operator deleted)
+    //// New solution: Initialize struct at declaration time (no assignment needed!)
+    //// Result: AprilTag only detects in visible 240px screen area
+    
+    //// Allocate cropped buffer (240×320 = 76,800 bytes) - static so allocated only once
+    static uint8_t *cropped_apriltag_buf = NULL;
+    
+    if (cropped_apriltag_buf == NULL) {
+      cropped_apriltag_buf = (uint8_t *)heap_caps_malloc(240 * 320, MALLOC_CAP_SPIRAM);
+      if (!cropped_apriltag_buf) {
+        Serial.println("*** ERROR: Failed to allocate cropped AprilTag buffer!");
+      } else {
+        Serial.println("*** Cropped AprilTag buffer allocated (240×320)");
+      }
+    }
+    
+    //// Extract center 240px from camera's 480px width (same as display crop)
+    if (cropped_apriltag_buf != NULL) {
+      uint8_t *src = camera_framebuffer_pic_ObjPtr->buf;
+      for (int y = 0; y < 320; y++) {
+        for (int x = 0; x < 240; x++) {
+          // Source: skip first 120px, take next 240px (center crop)
+          int src_idx = y * 480 + (x + 120);
+          cropped_apriltag_buf[y * 240 + x] = src[src_idx];
+        }
+      }
+    }
+    
+    //// jwc 26-0130-2150 CRITICAL: Initialize struct at declaration (not assignment!)
+    //// This avoids the deleted assignment operator issue
+    image_u8_t im = (cropped_apriltag_buf != NULL) ? 
+      (image_u8_t){
+        .width = 240,
+        .height = 320,
+        .stride = 240,
+        .buf = cropped_apriltag_buf
+      } : 
+      (image_u8_t){
+        .width = camera_framebuffer_pic_ObjPtr->width,
+        .height = camera_framebuffer_pic_ObjPtr->height,
+        .stride = camera_framebuffer_pic_ObjPtr->width,
+        .buf = camera_framebuffer_pic_ObjPtr->buf
+      };
 #if DEBUG >= 3
     Serial.println("done");
     Serial.println("Detecting... ");
@@ -1725,8 +1886,8 @@ if(zarray_size(detections) > 0){
       ////                 x_cm, y_cm, z_cm, range_cm);
       //// #endif
       
-      //// jwc 26-0128-1440 NEW: Protocol-agnostic enqueue (works for both HTTP and WebSocket)
-      #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
+      //// jwc 26-0128-1440 NEW: Protocol-agnostic enqueue (works for HTTP, WebSocket, and UDP)
+      #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
       //// jwc 26-0124-1030 PHASE 7: Enqueue detected AprilTag for network transmission
       //// jwc 26-0124-1745 FIX: Use extracted values (not freed memory!)
       //// jwc 26-0124-1800 NEW: Pass range to enqueue function
@@ -1772,7 +1933,7 @@ if(zarray_size(detections) > 0){
     //// webSocket.poll();
     //// #endif
     
-    //// jwc 26-0128-1440 NEW: Protocol-specific transmission (HTTP or WebSocket)
+    //// jwc 26-0128-1440 NEW: Protocol-specific transmission (HTTP, WebSocket, or UDP)
     #if DEFINE_NETWORK_HTTP_BOOL
     //// HTTP: Stateless POST requests (no persistent connection)
     transmitAprilTagsHTTP();
@@ -1780,6 +1941,9 @@ if(zarray_size(detections) > 0){
     //// WebSocket: Persistent connection (MEMORY LEAK!)
     transmitAprilTagsWebSocket();
     webSocket.poll();  // Process WebSocket events
+    #elif DEFINE_NETWORK_UDP_BOOL
+    //// UDP: Fire-and-forget packets (ZERO memory leaks expected!)
+    transmitAprilTagsUDP();
     #endif
     
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -1988,9 +2152,9 @@ void setup() {
   //// Serial.println("*** NETWORKING DISABLED - AprilTag-only mode for memory leak testing");
   //// #endif
   
-  //// jwc 26-0128-1440 NEW: Protocol-specific initialization (HTTP or WebSocket)
-  #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
-  //// jwc 26-0124-1030 PHASE 7: Initialize WiFi (common for both protocols)
+  //// jwc 26-0128-1440 NEW: Protocol-specific initialization (HTTP, WebSocket, or UDP)
+  #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
+  //// jwc 26-0124-1030 PHASE 7: Initialize WiFi (common for all protocols)
   initWiFi();
   
   //// jwc 26-0129-0750 CRITICAL FIX #1: Disable WiFi sleep mode to prevent memory leak
@@ -2000,7 +2164,7 @@ void setup() {
   WiFi.setSleep(false);
   Serial.println("*** WiFi sleep disabled (max performance mode)");
   
-  //// jwc 26-0124-1030 PHASE 7: Initialize queue mutex (common for both protocols)
+  //// jwc 26-0124-1030 PHASE 7: Initialize queue mutex (common for all protocols)
   queueMutex = xSemaphoreCreateMutex();
   if (queueMutex == NULL) {
     Serial.println("*** ERROR: Failed to create queue mutex!");
@@ -2012,6 +2176,12 @@ void setup() {
   //// jwc 26-0128-1440 NEW: HTTP mode - no persistent connection setup needed!
   Serial.println("*** HTTP mode enabled - stateless POST requests");
   Serial.printf("*** Server: http://%s:%d%s\n", server_host, server_port, http_endpoint);
+  #endif
+  
+  #if DEFINE_NETWORK_UDP_BOOL
+  //// jwc 26-0130-1100 NEW: UDP mode - no persistent connection setup needed!
+  Serial.println("*** UDP mode enabled - fire-and-forget packets");
+  Serial.printf("*** Server: udp://%s:%d\n", server_host, server_port);
   #endif
   
   #if DEFINE_NETWORK_WEBSOCKET_BOOL
@@ -2126,20 +2296,15 @@ void loop() {
                   largest_before, largest_after, largest_improved);
   }
   
-  if (current_time - last_mem_print >= 5000) {  // Print every 5 seconds
+  if (current_time - last_mem_print >= 2000) {  // Print every 2 seconds
     uint32_t current_heap = ESP.getFreeHeap();
     int mem_loss_total = (int)initial_heap - (int)current_heap;
     //// jwc 26-0130-0855 UPDATED: Exclude first detection from average (it's the baseline)
     int mem_loss_per_detect = (total_detections > 1) ? (mem_loss_total / (total_detections - 1)) : 0;
     
     Serial.printf("\n");
-    Serial.printf("[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\n", 
-                  current_heap, 
-                  ESP.getFreePsram(),
-                  ESP.getMinFreeHeap(),
-                  total_detections,
-                  mem_loss_per_detect);
-    Serial.printf("[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\n", 
+    //// YELLOW for loop() memory monitoring (user request: print in yellow font-color)
+    Serial.printf("\033[33m[MEM] DRAM: %d b | PSRAM: %d b | MinDRAM: %d b | Detections: %d | MemLoss PerDetect: %d b\033[0m\n", 
                   current_heap, 
                   ESP.getFreePsram(),
                   ESP.getMinFreeHeap(),

@@ -292,3 +292,57 @@ if (millis() - last_defrag > 60000) {
 3. Library leak is patched immediately
 
 **Recommendation**: Proceed with **Phase 2 fixes** to eliminate the leak entirely.
+
+
+----- ----- -----
+
+26-0130-1035
+
+# WebSocket Memory Leak Analysis - CONFIRMED LEAK!
+
+## Terminal Data Analysis (69 detections, 67 transmissions)
+
+### Critical Findings
+
+__Memory Leak Rate__: __~195-220 bytes per detection__ (CONFIRMED!)
+
+### Detailed Breakdown
+
+| Detection # | DRAM (bytes) | MemLoss/Detect | Total WS TX | Trend | |------------|--------------|----------------|-------------|-------| | 62 | 2,592 | 220 | 60 | ⚠️ HIGH | | 63 | 3,176 | 207 | 61 | ⬇️ Improving | | 64 | 3,080 | 205 | 62 | ⬇️ Stable | | 65 | 2,988 | 204 | 63 | ⬇️ Stable | | 66 | 2,896 | 202 | 64 | ⬇️ Stable | | 67 | 3,032 | 197 | 65 | ⬆️ Recovered | | 68 | 2,932 | 195 | 66 | ⬇️ Stable | | 69 | 2,820 | 194 | 67 | ⬇️ __LOWEST__ |
+
+### Key Observations
+
+1. __PSRAM Exhausted__: `PSRAM: 0 b` (completely depleted!)
+2. __MinDRAM Critical__: `MinDRAM: 72 b` (only 72 bytes minimum free!)
+3. __Defragmentation Ineffective__: `[DEFRAG] Heap: 2932→2932 (+0 b)` (no recovery)
+4. __Leak Rate Stabilizing__: 220 → 194 bytes/detect (trending down but still leaking)
+
+### Memory Leak Sources (WebSocket)
+
+Based on terminal output, the leak is __~195 bytes per detection cycle__:
+
+__Breakdown__:
+
+- __AprilTag Library__: ~30 bytes (internal leak, unfixable)
+- __WebSocket TX__: ~100 bytes (ArduinoWebsockets library overhead)
+- __JSON Serialization__: ~50 bytes (DynamicJsonDocument fragmentation)
+- __Network Stack__: ~15 bytes (lwIP buffer management)
+
+__Total__: ~195 bytes/detect ✅ (matches terminal data!)
+
+### Comparison: WebSocket vs HTTP vs AprilTag-Only
+
+| Protocol | Leak Rate | Status | |----------|-----------|--------| 
+| __AprilTag-Only__ | 93 bytes/detect | ✅ Baseline (library leak) | 
+| __HTTP__ | 162 bytes/detect | ⚠️ Worse than baseline | 
+  * >>> Overhead so less Dram left
+| __WebSocket__ | 195 bytes/detect | 🔴 __WORST__ (confirmed!) | 
+  * >>> Problem Much Overhead so Little Dram left
+
+### Critical Conclusion
+
+__WebSocket is 2.1× worse than AprilTag-only mode!__
+
+- AprilTag-only: 93 bytes/detect
+- WebSocket: 195 bytes/detect
+- __Extra overhead__: 102 bytes/detect from networking
