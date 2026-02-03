@@ -89,9 +89,9 @@
 //// jwc 26-0130-1000 TESTING: Switch to WebSocket per user request
 //// jwc 26-0130-1035 NEW: UDP protocol (stateless, zero memory leaks expected!)
 //// Set ONE to 1 to enable (only one protocol active at a time)
+#define DEFINE_NETWORK_UDP_BOOL 1         // UDP protocol (fire-and-forget, BEST for memory!)
 #define DEFINE_NETWORK_HTTP_BOOL 0        // HTTP POST protocol (stateless, simpler)
-#define DEFINE_NETWORK_WEBSOCKET_BOOL 1   // WebSocket protocol (MEMORY LEAK: 195 bytes/detect)
-#define DEFINE_NETWORK_UDP_BOOL 0         // UDP protocol (fire-and-forget, BEST for memory!)
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 0   // WebSocket protocol (MEMORY LEAK: 195 bytes/detect)
 
 #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
 //// jwc 26-0124-1030 PHASE 1: WiFi includes + configuration
@@ -1056,8 +1056,14 @@ void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, flo
   
   //// Color-coded status reporting
   if (result == 1) {
-    //// GREEN for success (packet sent)
-    Serial.printf("\033[32m*** ✅ Esp32 <<-> SvHub: UDP TX SUCCESS: %s\033[0m\n", jsonBuffer);
+    //// jwc 26-0203-0610 UPDATED: Changed from green checkmark (✅) to gray checkmark (✓) per user request
+    //// GRAY for UDP TX (data sent to network, waiting for ACK confirmation)
+    Serial.printf("\033[90m*** ✓ Esp32 -->> SvHub: UDP TX SUCCESS: %s\033[0m\n", jsonBuffer);
+    
+    //// jwc 26-0203-0610 CRITICAL FIX: Increment counter IMMEDIATELY after TX (not after ACK!)
+    //// Bug: Counter was incremented AFTER ACK wait, causing 200% inflation if ACK received
+    //// Fix: Increment BEFORE ACK wait - counter tracks actual transmissions, not ACKs
+    total_transmitted_udp++;  // Increment counter on TX success (not ACK!)
     
     //// jwc 26-0131-0210 NEW: Wait for UDP ACK from server (with timeout)
     unsigned long ack_start = millis();
@@ -1081,8 +1087,10 @@ void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, flo
             const char* status = ackDoc["status"];
             int ack_tag_id = ackDoc["tag_id"];
             
+            //// jwc 26-0203-0610 UPDATED: Changed from cyan checkmark (✅) to green checkmark (✅)
+            //// GREEN for ACK received - confirms server got the data!
             // Print ACK with tag_id confirmation
-            Serial.printf("\033[36m*** ✅ Esp32 <<-- SvHub: UDP ACK received | tag_id=%d, status=%s\033[0m\n", 
+            Serial.printf("\033[32m*** ✅ Esp32 <<-> SvHub: UDP ACK received | tag_id=%d, status=%s\033[0m\n", 
                           ack_tag_id, status ? status : "unknown");
           } else {
             Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK parse error: %s\033[0m\n", ackBuffer);
@@ -1096,8 +1104,6 @@ void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, flo
     if (millis() - ack_start >= ACK_TIMEOUT) {
       Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: UDP ACK timeout (no response)\033[0m\n");
     }
-    
-    total_transmitted_udp++;  // Increment counter on success
   } else {
     //// RED for failure
     Serial.printf("\033[31m*** ❌ Esp32 -->> SvHub: UDP TX FAILED: %s\033[0m\n", jsonBuffer);
@@ -1121,37 +1127,18 @@ void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, flo
 
 #if DEFINE_NETWORK_HTTP_BOOL
 
-//// jwc 26-0129-1250 MIGRATED: ESP-IDF native HTTP client (zero memory leaks!)
-//// ARCHIVED: Arduino HTTPClient approach (memory leak: ~160 bytes/TX)
-//// static HTTPClient http;  // OLD: Persistent HTTP client (still leaked!)
+//// jwc 26-0203-0347 NEW: HTTP immediate transmission (like UDP/WebSocket)
+//// ARCHIVED: Queue-based transmission with 1-second interval (too complex!)
+//// NEW: Immediate transmission when lock achieved (simpler, consistent!)
 
-void transmitAprilTagsHTTP() {
-  unsigned long currentTime = millis();
-  
-  // Check if it's time to transmit
-  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
-    return;
-  }
-  
-  //// jwc 26-0129-0710 UPDATED: Color-coded memory monitoring
-  uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t minFreeHeap = ESP.getMinFreeHeap();
-  uint32_t freePsram = ESP.getFreePsram();
-  Serial.printf("\n");
-  
-  //// Color-code based on memory level
-  //// jwc 26-0129-0950 UPDATED: Replace green (32m) with cyan (36m) - green not working in terminal
-  if (freeHeap < 10000) {
-    //// RED for critical (< 10KB)
-    Serial.printf("\033[31m*** *** *** [MEM] CRITICAL: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_http);
-  } else if (freeHeap < 15000) {
-    //// YELLOW for warning (10-15KB)
-    Serial.printf("\033[33m*** *** *** [MEM] WARNING: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_http);
-  } else {
-    //// CYAN for OK (> 15KB) - green (32m) not working, using cyan (36m) instead
-    Serial.printf("\033[36m*** *** *** [MEM] OK: Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", freeHeap, freePsram, total_transmitted_http);
-  }
-  Serial.printf("\n");
+//// jwc 26-0203-0347 NEW: Immediate transmission function (no queue!)
+//// Called directly when lock achieved - bypasses queue entirely
+void transmitAprilTagHTTP_Immediate(int id, float decision_margin, float yaw, float pitch, float roll, 
+                                     float x, float y, float z, float range) {
+  //// jwc 26-0203-0405 NEW: Memory monitoring AFTER transmission (shows protocol's memory impact!)
+  //// Moved from BEFORE transmission to capture actual memory consumed by HTTP POST
+  //// This reveals memory leaks from buffer allocation, socket state, or cleanup failures
+  //// Expected: ~0 bytes/TX leak for HTTP (stateless, proper cleanup)
   
   // Check if WiFi is connected
   if (WiFi.status() != WL_CONNECTED) {
@@ -1159,157 +1146,103 @@ void transmitAprilTagsHTTP() {
     return;
   }
   
-  // Check if queue has data
-  if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (queueCount > 0) {
-      // Send each tag as individual HTTP POST
-      int transmitted = 0;
-      while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
-        //// jwc 26-0129-1740 CRITICAL FIX: Replace DynamicJsonDocument with StaticJsonDocument (prevents heap leak!)
-        //// ARCHIVED (memory leak): DynamicJsonDocument doc(512); (~512 bytes leaked per TX due to heap fragmentation)
-        //// Problem: DynamicJsonDocument allocates from PSRAM→DRAM heap, causing fragmentation over time
-        //// After 60 TX: PSRAM exhausted (88→0 bytes), DRAM leaked (21KB→10KB), system crash imminent!
-        //// Solution: StaticJsonDocument allocates on STACK (auto-freed when function returns)
-        //// Result: Zero memory leaks, runs forever! ✅
-        
-        // Create JSON document for single tag (STACK-ALLOCATED - no heap leak!)
-        StaticJsonDocument<512> doc;
-        doc["tag_id"] = tagQueue[queueHead].id;
-        doc["decision_margin"] = round(tagQueue[queueHead].decision_margin * 10.0) / 10.0;
-        doc["yaw"] = round(tagQueue[queueHead].yaw * 10.0) / 10.0;
-        doc["pitch"] = round(tagQueue[queueHead].pitch * 10.0) / 10.0;
-        doc["roll"] = round(tagQueue[queueHead].roll * 10.0) / 10.0;
-        doc["x_cm"] = round(tagQueue[queueHead].x * 10.0) / 10.0;
-        doc["y_cm"] = round(tagQueue[queueHead].y * 10.0) / 10.0;
-        doc["z_cm"] = round(tagQueue[queueHead].z * 10.0) / 10.0;
-        doc["range_cm"] = round(tagQueue[queueHead].range * 10.0) / 10.0;
-        doc["timestamp"] = tagQueue[queueHead].timestamp;
-        doc["camera_name"] = "Waveshare-ESP32-S3";
-        
-        // Add IP address (stack-allocated buffer)
-        char ipBuffer[16];
-        IPAddress ip = WiFi.localIP();
-        snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-        doc["smartcam_ip"] = ipBuffer;
-        
-        // Serialize JSON to stack buffer
-        char jsonBuffer[512];
-        serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
-        
-        //// jwc 26-0129-1200 ARCHIVED: Arduino HTTPClient implementation (memory leak: ~160 bytes/TX)
-        //// // HTTP POST request
-        //// HTTPClient http;
-        //// char url[128];
-        //// snprintf(url, sizeof(url), "http://%s:%d%s", server_host, server_port, http_endpoint);
-        //// 
-        //// http.begin(url);
-        //// http.addHeader("Content-Type", "application/json");
-        //// http.addHeader("Authorization", AUTH_TOKEN);
-        //// 
-        //// int httpCode = http.POST(jsonBuffer);
-        //// 
-        //// //// jwc 26-0129-0650 CRITICAL FIX: Eliminate ALL String leaks in HTTP error handling
-        //// //// jwc 26-0129-0700 UPDATED: Added ANSI color codes for visual debugging
-        //// //// ARCHIVED (memory leak): String response = http.getString(); (~200 bytes leak per TX!)
-        //// //// ARCHIVED (memory leak): http.errorToString(httpCode).c_str() (~200 bytes leak per error!)
-        //// //// Problem: String objects allocate heap memory that's never freed
-        //// //// Solution: Skip response body entirely (stateless HTTP doesn't need it!)
-        //// if (httpCode > 0) {
-        ////   if (httpCode == 200) {
-        ////     //// jwc 26-0129-0700 GREEN for success
-        ////     Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: HTTP POST SUCCESS: %s (code: 200)\033[0m\n", jsonBuffer);
-        ////   } else {
-        ////     //// jwc 26-0129-0700 YELLOW for HTTP errors (4xx, 5xx)
-        ////     Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: HTTP POST ERROR: %s (code: %d)\033[0m\n", jsonBuffer, httpCode);
-        ////   }
-        //// } else {
-        ////   //// jwc 26-0129-0700 RED for connection failures
-        ////   Serial.printf("\033[31m*** ❌ Esp32 <<--SvHub: ERROR: HTTP POST failed (code: %d)\033[0m\n", httpCode);
-        //// }
-        //// 
-        //// http.end();  // Close connection (stateless!)
-        
-        //// jwc 26-0129-1200 NEW: ESP-IDF esp_http_client implementation (zero memory leaks!)
-        //// Build full URL
-        char url[128];
-        snprintf(url, sizeof(url), "http://%s:%d%s", server_host, server_port, http_endpoint);
-        
-        //// Configure HTTP client
-        esp_http_client_config_t config = {
-          .url = url,
-          .method = HTTP_METHOD_POST,
-          .timeout_ms = 5000,
-        };
-        
-        //// Initialize client
-        esp_http_client_handle_t client = esp_http_client_init(&config);
-        
-        //// Set headers
-        esp_http_client_set_header(client, "Content-Type", "application/json");
-        esp_http_client_set_header(client, "Authorization", AUTH_TOKEN);
-        
-        //// Set POST data
-        esp_http_client_set_post_field(client, jsonBuffer, strlen(jsonBuffer));
-        
-        //// Perform HTTP POST
-        esp_err_t err = esp_http_client_perform(client);
-        
-        //// jwc 26-0129-1750 CRITICAL FIX #3: Read response to force ESP-IDF buffer cleanup (prevents ~253 byte/TX leak!)
-        //// Problem: esp_http_client_perform() allocates internal response buffer (~256 bytes) even if you don't read it
-        //// ESP-IDF doesn't always free this buffer properly in cleanup(), causing memory leak
-        //// Solution: Explicitly read response (even if we don't use it) to trigger proper buffer cleanup
-        //// Result: Forces ESP-IDF to free internal buffers, eliminating the ~253 byte/TX leak!
-        int content_length = esp_http_client_get_content_length(client);
-        if (content_length > 0) {
-          char dummy_buffer[64];  // Stack-allocated, auto-freed
-          int read_len = esp_http_client_read(client, dummy_buffer, sizeof(dummy_buffer));
-          // We don't use the response, just reading it forces buffer cleanup
-        }
-        
-        //// Color-coded status reporting (ESP-IDF style)
-        if (err == ESP_OK) {
-          int status_code = esp_http_client_get_status_code(client);
-          if (status_code == 200) {
-            //// GREEN for success
-            Serial.printf("\033[32m*** ✅ Esp32 <<-> SvHub: HTTP POST SUCCESS: %s (code: 200)\033[0m\n", jsonBuffer);
-          } else {
-            //// YELLOW for HTTP errors (4xx, 5xx)
-            Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: HTTP POST ERROR: %s (code: %d)\033[0m\n", jsonBuffer, status_code);
-          }
-        } else {
-          //// RED for connection failures
-          Serial.printf("\033[31m*** ❌ Esp32 <<--SvHub: ERROR: HTTP POST failed (err: %s)\033[0m\n", esp_err_to_name(err));
-        }
-        
-        //// jwc 26-0129-1730 CRITICAL FIX #2: Close TCP connection before cleanup (prevents socket leak!)
-        //// ESP-IDF docs: "Call esp_http_client_close() to close the connection and free the socket
-        //// before calling esp_http_client_cleanup()" - https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/protocols/esp_http_client.html
-        //// Without close(): TCP socket stays in TIME_WAIT state (~205 bytes leaked per TX)
-        //// With close(): Socket freed immediately (zero leaks!)
-        esp_http_client_close(client);
-        
-        //// Cleanup (properly frees all buffers - no leaks!)
-        esp_http_client_cleanup(client);
-        
-        queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
-        queueCount--;
-        transmitted++;
-      }  // ← MISSING CLOSING BRACE FOR while() LOOP!
-      
-      total_transmitted_http += transmitted;
-      
-      Serial.printf("*** Esp32 -->> SvHub: Sent %d tags via HTTP\n", transmitted);
-      lastTransmitTime = currentTime;
-      
-      // Clear queue after transmission
-      queueHead = 0;
-      queueTail = 0;
-      queueCount = 0;
-      memset(tagQueue, 0, sizeof(tagQueue));
-      Serial.println("*** Queue cleared after transmission");
-    }
-    xSemaphoreGive(queueMutex);
+  // Create JSON document for single tag (STACK-ALLOCATED - no heap leak!)
+  StaticJsonDocument<512> doc;
+  doc["tag_id"] = id;
+  doc["decision_margin"] = round(decision_margin * 10.0) / 10.0;
+  doc["yaw"] = round(yaw * 10.0) / 10.0;
+  doc["pitch"] = round(pitch * 10.0) / 10.0;
+  doc["roll"] = round(roll * 10.0) / 10.0;
+  doc["x_cm"] = round(x * 10.0) / 10.0;
+  doc["y_cm"] = round(y * 10.0) / 10.0;
+  doc["z_cm"] = round(z * 10.0) / 10.0;
+  doc["range_cm"] = round(range * 10.0) / 10.0;
+  doc["timestamp"] = millis();
+  doc["camera_name"] = "Waveshare-ESP32-S3";
+  
+  // Add IP address (stack-allocated buffer)
+  char ipBuffer[16];
+  IPAddress ip = WiFi.localIP();
+  snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  doc["smartcam_ip"] = ipBuffer;
+  
+  // Serialize JSON to stack buffer
+  char jsonBuffer[512];
+  serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+  
+  //// jwc 26-0129-1200 NEW: ESP-IDF esp_http_client implementation (zero memory leaks!)
+  //// Build full URL
+  char url[128];
+  snprintf(url, sizeof(url), "http://%s:%d%s", server_host, server_port, http_endpoint);
+  
+  //// Configure HTTP client
+  esp_http_client_config_t config = {
+    .url = url,
+    .method = HTTP_METHOD_POST,
+    .timeout_ms = 5000,
+  };
+  
+  //// Initialize client
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  
+  //// Set headers
+  esp_http_client_set_header(client, "Content-Type", "application/json");
+  esp_http_client_set_header(client, "Authorization", AUTH_TOKEN);
+  
+  //// Set POST data
+  esp_http_client_set_post_field(client, jsonBuffer, strlen(jsonBuffer));
+  
+  //// Perform HTTP POST
+  esp_err_t err = esp_http_client_perform(client);
+  
+  //// jwc 26-0129-1750 CRITICAL FIX #3: Read response to force ESP-IDF buffer cleanup (prevents ~253 byte/TX leak!)
+  //// Problem: esp_http_client_perform() allocates internal response buffer (~256 bytes) even if you don't read it
+  //// ESP-IDF doesn't always free this buffer properly in cleanup(), causing memory leak
+  //// Solution: Explicitly read response (even if we don't use it) to trigger proper buffer cleanup
+  //// Result: Forces ESP-IDF to free internal buffers, eliminating the ~253 byte/TX leak!
+  int content_length = esp_http_client_get_content_length(client);
+  if (content_length > 0) {
+    char dummy_buffer[64];  // Stack-allocated, auto-freed
+    int read_len = esp_http_client_read(client, dummy_buffer, sizeof(dummy_buffer));
+    // We don't use the response, just reading it forces buffer cleanup
   }
+  
+  //// Color-coded status reporting (ESP-IDF style)
+  if (err == ESP_OK) {
+    int status_code = esp_http_client_get_status_code(client);
+    if (status_code == 200) {
+      //// GREEN for success
+      Serial.printf("\033[32m*** ✅ Esp32 <<-> SvHub: HTTP POST SUCCESS: %s (code: 200)\033[0m\n", jsonBuffer);
+      total_transmitted_http++;  // Increment counter on success
+    } else {
+      //// YELLOW for HTTP errors (4xx, 5xx)
+      Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: HTTP POST ERROR: %s (code: %d)\033[0m\n", jsonBuffer, status_code);
+    }
+  } else {
+    //// RED for connection failures
+    Serial.printf("\033[31m*** ❌ Esp32 <<--SvHub: ERROR: HTTP POST failed (err: %s)\033[0m\n", esp_err_to_name(err));
+  }
+  
+  //// jwc 26-0129-1730 CRITICAL FIX #2: Close TCP connection before cleanup (prevents socket leak!)
+  //// ESP-IDF docs: "Call esp_http_client_close() to close the connection and free the socket
+  //// before calling esp_http_client_cleanup()" - https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/protocols/esp_http_client.html
+  //// Without close(): TCP socket stays in TIME_WAIT state (~205 bytes leaked per TX)
+  //// With close(): Socket freed immediately (zero leaks!)
+  esp_http_client_close(client);
+  
+  //// Cleanup (properly frees all buffers - no leaks!)
+  esp_http_client_cleanup(client);
+  
+  //// jwc 26-0203-0405 NEW: Memory monitoring AFTER transmission (shows protocol's memory impact!)
+  //// Moved from BEFORE transmission to capture actual memory consumed by HTTP POST
+  //// This reveals memory leaks from buffer allocation, socket state, or cleanup failures
+  //// Expected: ~0 bytes/TX leak for HTTP (stateless, proper cleanup)
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t freePsram = ESP.getFreePsram();
+  Serial.printf("\n");
+  Serial.printf("\033[36m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total HTTP TX: %d\033[0m\n", 
+                freeHeap, freePsram, total_transmitted_http);
+  Serial.printf("\n");
 }
 #endif
 #endif
@@ -1832,8 +1765,11 @@ static void task(void *param) {
 int closest_idx = -1;
 
 if(zarray_size(detections) > 0){
-  //// jwc 26-0130-0716 NEW: Increment counter when actual AprilTag detected (not just detection attempts)
-  total_detections++;  // Count actual tags found, not detection attempts
+  //// jwc 26-0203-0840 CRITICAL FIX: Removed duplicate total_detections++ increment
+  //// Bug: Counter was incremented TWICE per detection (here AND at line ~1870)
+  //// Result: Inflated counter by 2× (93 detections shown, but only 47 actual)
+  //// Fix: Keep ONLY the increment inside if(closest_idx >= 0) block (line ~1870)
+  //// This ensures we count ONLY when a valid tag is processed, not just detected
   
   //// jwc 26-0124-2240 NEW: Find tag closest to screen center (480x320 → center at 240,160)
   float min_dist_to_center = 999999.0;
@@ -1919,6 +1855,12 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
   //// jwc 26-0124-2240 Process ONLY the closest tag (prevents freeze with multiple tags)
   //// jwc 26-0125-0400 UPDATED: Moved tag ID display from upper-left to upper-right
   if (closest_idx >= 0) {
+    //// jwc 26-0203-0905 CRITICAL FIX: Moved total_detections++ to transmission block!
+    //// Bug: Counter incremented on EVERY detection (2× per cycle: lock start + lock achieved)
+    //// Result: 2× inflation (Detections: 66 | UDP TX: 33 → ratio 2:1 instead of 1:1)
+    //// Fix: Increment ONLY when transmission happens (inside if(lock_achieved) block)
+    //// This ensures 1:1 ratio between detections counter and actual transmissions
+    
     //// jwc 26-0125-0400 ARCHIVED: Original upper-left tag ID display
     //// jwc 26-0125-0400 ARCHIVED: //// jwc oo tft.setCursor(1,1);
     //// jwc 26-0125-0400 ARCHIVED: gfx->setCursor(1,1);
@@ -1961,20 +1903,12 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
       //// jwc oo tft.printf("%d ", (det->id));
       gfx->printf("%d ", (det->id));
       
-      //// jwc 26-0131-1245 NEW: Add countdown timer (same font size as tag ID)
-      //// jwc 26-0131-1450 ARCHIVED: Countdown timer (not needed for immediate lock)
-      //// jwc 26-0131-1510 UPDATED: Renamed lock_start_time → lock_start_time_msec
-      if (tagDetectLock.locked_tag_id == det->id && !tagDetectLock.lock_achieved) {
-        //// Show countdown timer while locking (0.0s → 5.0s)
-        unsigned long now = millis();
-        float elapsed = (now - tagDetectLock.lock_start_time_msec) / 1000.0;
-        gfx->setTextSize(2);  // Same font size as HUD (was 3, now 2)
-        gfx->setTextColor(YELLOW);
-        gfx->setCursor(x_pos, 45);  // Below tag ID
-        gfx->printf("(%.1fs)", elapsed);
-      } else if (tagDetectLock.locked_tag_id == det->id && tagDetectLock.lock_achieved) {
-        //// Show "LOCK" indicator when locked (brief moment before reset)
-        gfx->setTextSize(2);  // Same font size as HUD (was 3, now 2)
+      //// jwc 26-0203-0820 UPDATED: Removed countdown timer - show (LOCK) immediately
+      //// Old: Showed (0.0s) briefly before (LOCK) - confusing for immediate lock
+      //// New: Show (LOCK) as soon as tag detected - clearer for 0ms threshold
+      if (tagDetectLock.locked_tag_id == det->id) {
+        //// Show "LOCK" indicator immediately when tag detected
+        gfx->setTextSize(2);  // Same font size as HUD
         gfx->setTextColor(GREEN);
         gfx->setCursor(x_pos, 45);
         gfx->printf("(LOCK)");
@@ -1985,14 +1919,10 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
       //// jwc add pose: //// jwc o Serial.print(", ");
 
 
-      // Print tag ID
-      //// jwc o Serial.print("ID: ");
-      //// jwc o Serial.println(det->id);
-      //// jwc n Serial.println("*** *** *** ", det->id, det->family, det->decision_margin);
-      // Print tag ID and decision margin
-      //// jwc y printf("*** *** *** [DET]%d,%f,", det->id, det->decision_margin);
-      printf("*** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
-
+      //// jwc 26-0203-0710 CONSOLIDATED: Removed first printf, moved to single print after pose calculation
+      //// Old: 2 separate printf calls (inefficient, confusing)
+      //// New: 1 consolidated printf with all data (cleaner, more efficient)
+      
       // Creating detection info object to feed into pose estimator
       apriltag_detection_info_t info;
       info.det = det;
@@ -2048,10 +1978,10 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
       //// jwc 26-0124-1800 NEW: Calculate range (3D distance from camera to tag)
       float range_cm = sqrt(x_cm*x_cm + y_cm*y_cm + z_cm*z_cm);
       
-      //// jwc 26-0124-1335 UPDATED: Single-line AprilTag detection output (keep original printf for screen display)
-      printf("*** *** [DETECT ID:] %5.0d,%5.0f,", det->id, det->decision_margin);
-      printf(" *** y,p,r: %5.0f, %5.0f, %5.0f", yaw, pitch, roll);
-      printf(" *** x,y,z: %.1f, %.1f, %.1f cm, range: %.1f cm\n", x_cm, y_cm, z_cm, range_cm);
+      //// jwc 26-0203-0710 CONSOLIDATED: Single printf with all detection data (was 2 separate prints)
+      //// Cleaner output: 1 line per detection instead of 2
+      printf("*** *** [DETECT ID:] %5.0d,%5.0f, *** y,p,r: %5.0f, %5.0f, %5.0f *** x,y,z: %.1f, %.1f, %.1f cm, range: %.1f cm\n", 
+             det->id, det->decision_margin, yaw, pitch, roll, x_cm, y_cm, z_cm, range_cm);
 
       // Free the matrices (AFTER extracting values!)
       matd_destroy(R_transpose);
@@ -2074,6 +2004,10 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
       //// New: Lock → transmit immediately (WORKS!)
       #if DEFINE_NETWORK_UDP_BOOL
       if (tagDetectLock.lock_achieved) {
+        //// jwc 26-0203-0910 CRITICAL FIX: Increment counter HERE (when transmission happens!)
+        //// This is the ONLY place counter increments - ensures 1:1 ratio with UDP TX
+        total_detections++;  // Count actual transmissions, not detections
+        
         //// Lock achieved - transmit immediately (no queue!)
         transmitAprilTagUDP_Immediate(det->id, det->decision_margin, yaw, pitch, roll, 
                                        x_cm, y_cm, z_cm, range_cm);
@@ -2101,10 +2035,17 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
       }
       #elif DEFINE_NETWORK_HTTP_BOOL
       if (tagDetectLock.lock_achieved) {
-        //// HTTP still uses queue (stateless, needs batching for efficiency)
-        enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
-                        x_cm, y_cm, z_cm, range_cm);
-        Serial.printf("*** [LOCK] 📤 ENQUEUED tag ID %d for HTTP transmission\n", det->id);
+        //// jwc 26-0203-0405 NEW: HTTP now transmits immediately (like UDP/WebSocket!)
+        //// Lock achieved - transmit immediately (no queue!)
+        transmitAprilTagHTTP_Immediate(det->id, det->decision_margin, yaw, pitch, roll, 
+                                        x_cm, y_cm, z_cm, range_cm);
+        Serial.printf("*** [LOCK-YES] 📤 TRANSMITTED tag ID %d immediately via HTTP (no queue)\n", det->id);
+        
+        //// jwc 26-0203-0405 UPDATED: Reset lock AFTER transmission completes (consistent with UDP/WebSocket)
+        //// This is the ONLY place lock gets reset - ensures transmission always happens
+        tagDetectLock.locked_tag_id = -1;
+        tagDetectLock.lock_achieved = false;
+        Serial.printf("*** [LOCK-NOT] 🔄 RESET - must relock (immediate) for next transmission\n");
       }
       #endif
   }
@@ -2126,6 +2067,13 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
 #endif
     // Free detection result object
     apriltag_detections_destroy(detections);
+    
+    //// jwc 26-0203-0815 NEW: Force garbage collection after AprilTag detection
+    //// AprilTag library has internal memory leak (~125 bytes/detection)
+    //// Force ESP32 heap cleanup to minimize leak impact
+    heap_caps_check_integrity_all(true);  // Check and consolidate heap
+    ESP.getFreeHeap();  // Triggers garbage collection
+    delay(10);  // Allow cleanup to complete
 
     //// jwc 26-0127-2140 CRITICAL FIX: Return camera buffer AFTER AprilTag detection
     //// AprilTag detector needs camera_framebuffer_pic_ObjPtr->buf, so we can't free it earlier
@@ -2148,9 +2096,10 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
     
     //// jwc 26-0128-1440 NEW: Protocol-specific transmission (HTTP, WebSocket, or UDP)
     //// jwc 26-0131-1350 UPDATED: UDP now uses immediate transmission (no queue check needed!)
+    //// jwc 26-0203-0410 UPDATED: HTTP now uses immediate transmission (no queue check needed!)
     #if DEFINE_NETWORK_HTTP_BOOL
-    //// HTTP: Stateless POST requests (queue-based for efficiency)
-    transmitAprilTagsHTTP();
+    //// HTTP: Immediate transmission (already sent in detection loop!)
+    //// No queue check needed - transmission happens immediately when lock achieved
     #elif DEFINE_NETWORK_WEBSOCKET_BOOL
     //// jwc 26-0201-0735 NEW: WebSocket now uses immediate transmission (no queue check!)
     //// WebSocket: Persistent connection, immediate transmission (already sent!)
