@@ -90,8 +90,8 @@
 //// jwc 26-0130-1035 NEW: UDP protocol (stateless, zero memory leaks expected!)
 //// Set ONE to 1 to enable (only one protocol active at a time)
 #define DEFINE_NETWORK_HTTP_BOOL 0        // HTTP POST protocol (stateless, simpler)
-#define DEFINE_NETWORK_WEBSOCKET_BOOL 0   // WebSocket protocol (MEMORY LEAK: 195 bytes/detect)
-#define DEFINE_NETWORK_UDP_BOOL 1         // UDP protocol (fire-and-forget, BEST for memory!)
+#define DEFINE_NETWORK_WEBSOCKET_BOOL 1   // WebSocket protocol (MEMORY LEAK: 195 bytes/detect)
+#define DEFINE_NETWORK_UDP_BOOL 0         // UDP protocol (fire-and-forget, BEST for memory!)
 
 #if DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL || DEFINE_NETWORK_UDP_BOOL
 //// jwc 26-0124-1030 PHASE 1: WiFi includes + configuration
@@ -275,8 +275,12 @@ struct LatestTagDisplay {
 //// jwc 26-0131-1240 UPDATED: Reset lock after each transmission (must relock each time)
 //// jwc 26-0131-1450 UPDATED: Changed from 5-second lock to immediate (> 0 sec)
 //// jwc 26-0131-1510 UPDATED: Renamed variables for clarity (_msec suffix)
+//// jwc 26-0202-0800 UPDATED: Renamed LOCK_DURATION_MSEC → DETECT_THRESHOLD_FOR_TX_MSEC (clearer purpose)
+//// jwc 26-0202-0800 UPDATED: Removed LOCK_POSTRESET_TIMEOUT_MSEC (immediate reset on lost detection)
+//// jwc 26-0202-0945 UPDATED: Renamed tagLock → tagDetectLock (clearer name)
+//// jwc 26-0202-0955 UPDATED: Renamed TagLockState → tagDetectLock_Struct (clearer name)
 //// Prevents spurious transmissions, reduces network traffic
-struct TagLockState {
+struct tagDetectLock_Struct {
   int locked_tag_id = -1;                              // Currently locked tag ID (-1 = none)
   unsigned long lock_start_time_msec = 0;              // When lock started (millis)
   unsigned long last_seen_time_msec = 0;               // Last time this tag was detected
@@ -285,13 +289,13 @@ struct TagLockState {
   //// jwc 26-0131-1450 ARCHIVED: 5-second lock (too slow for testing)
   //// const unsigned long LOCK_DURATION = 5000;       // 5 seconds continuous detection required
   //// jwc y const unsigned long LOCK_DURATION = 5000;    // 5 seconds continuous detection required
-  const unsigned long LOCK_DURATION_MSEC = 0;          // Immediate (> 0 msec) - transmit on first detection
+  //// jwc 26-0202-0800 RENAMED: LOCK_DURATION_MSEC → DETECT_THRESHOLD_FOR_TX_MSEC (clearer name)
+  const unsigned long DETECT_THRESHOLD_FOR_TX_MSEC = 0;  // Immediate (> 0 msec) - transmit on first detection
   
-  //// jwc 26-0131-1450 NEW: Immediate lock (> 0 sec = instant transmission)  
-  //// jwc y const unsigned long LOCK_POSTRESET_TIMEOUT_MSEC = 2000;  // 2 seconds without tag = reset lock
-  //// jwc n const unsigned long LOCK_POSTRESET_TIMEOUT_MSEC = 0;  // 0 seconds without tag = reset lock
-  const unsigned long LOCK_POSTRESET_TIMEOUT_MSEC = 1000;  // 0 seconds without tag = reset lock
-} tagLock;
+  //// jwc 26-0202-0800 REMOVED: LOCK_POSTRESET_TIMEOUT_MSEC (no longer needed - immediate reset on lost detection)
+  //// Old behavior: Wait 1-3 seconds before declaring tag "lost"
+  //// New behavior: If tag not detected, immediately reset lock (simpler, clearer)
+} tagDetectLock;
 
 /*To use the built-in examples and demos of LVGL uncomment the includes below respectively.
  *You also need to copy `lvgl/examples` to `lvgl/src/examples`. Similarly for the demos `lvgl/demos` to `lvgl/src/demos`.
@@ -827,9 +831,12 @@ void setupWebSocketHandlers() {
   //// jwc 26-0128-1420 NEW: Use c_str() directly to avoid String allocation
   //// message.c_str() returns const char* from internal buffer (no heap allocation)
   //// jwc 26-0130-1022 NEW: Added green color indicator (matches HTTP success format)
+  //// jwc 26-0202-0010 UPDATED: Changed to gray checkmark for ACK (distinguishes from TX success)
+  //// jwc 26-0202-0625 UPDATED: Swapped icons - green checkmark (✅) for ACK, gray checkmark (✓) for TX
   webSocket.onMessage([](WebsocketsMessage message) {
     const char* data = message.c_str();
-    Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: RX: %s\033[0m\n", data);
+    //// Green checkmark (✅) for ACK received - confirms server got the data!
+    Serial.printf("\033[32m*** ✅ Esp32 <<-> SvHub: WebSocket TX-ACK: %s\033[0m\n", data);
   });
   
   webSocket.onEvent([](WebsocketsEvent event, String data) {
@@ -904,122 +911,87 @@ void enqueueAprilTag(int id, float decision_margin, float yaw, float pitch, floa
 }
 
 #if DEFINE_NETWORK_WEBSOCKET_BOOL
-//// Transmit queued AprilTag data via WebSocket (called periodically)
-//// jwc 26-0124-1530 UPDATED: Send individual tag messages (not array) to match server format
-//// jwc 26-0127-0735 NEW: Added memory monitoring and transmission counter
+//// jwc 26-0201-0735 UPDATED: Converted to immediate transmission (like UDP)
+//// ARCHIVED: Queue-based transmission with 1-second interval (too slow!)
+//// NEW: Immediate transmission when lock achieved (real-time, no delays!)
 static int total_transmitted_ws = 0;  // Track total WebSocket messages sent
 
-void transmitAprilTagsWebSocket() {
-  unsigned long currentTime = millis();
-  
-  // Check if it's time to transmit
-  if (currentTime - lastTransmitTime < TRANSMIT_INTERVAL) {
-    return;
-  }
-  
-  //// jwc 26-0127-0735 NEW: Memory monitoring (print every transmission)
-  uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t minFreeHeap = ESP.getMinFreeHeap();
-  uint32_t freePsram = ESP.getFreePsram();
-  Serial.printf("\n");
-  Serial.printf("*** *** *** [MEM} Free_Dram_Heap: %d b | Free_Psram: %d b | Total WS TX: %d\n", freeHeap, freePsram, total_transmitted_ws);
-  Serial.printf("\n");
-
-  //// jwc 26-0127-2100 y //// jwc 26-0127-0735 WARNING: Low memory detection
-  //// jwc 26-0127-2100 y if (freeHeap < 20000) {
-  //// jwc 26-0127-2100 y   Serial.printf("*** [MEM] WARNING: Low memory! Free=%d bytes\n", freeHeap);
-  //// jwc 26-0127-2100 y }
+//// jwc 26-0201-0735 NEW: Immediate transmission function (no queue!)
+//// Called directly when lock achieved - bypasses queue entirely
+void transmitAprilTagWebSocket_Immediate(int id, float decision_margin, float yaw, float pitch, float roll, 
+                                          float x, float y, float z, float range) {
+  //// jwc 26-0201-1400 ARCHIVED: Memory monitoring BEFORE transmission (can't see protocol impact!)
+  //// uint32_t freeHeap = ESP.getFreeHeap();
+  //// uint32_t freePsram = ESP.getFreePsram();
+  //// Serial.printf("\n");
+  //// Serial.printf("\033[35m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total WS TX: %d\033[0m\n", 
+  ////               freeHeap, freePsram, total_transmitted_ws);
+  //// Serial.printf("\n");
   
   // Check if WebSocket is connected
-  //// jwc 26-0128-0500 ARCHIVED: Links2004 isConnected method
-  //// if (!webSocket.isConnected()) {
-  //// jwc 26-0128-0500 NEW: ArduinoWebsockets available method
   if (!webSocket.available()) {
     Serial.println("*** WebSocket not connected, skipping transmission");
     return;
   }
   
-  // Check if queue has data
-  if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (queueCount > 0) {
-      // Send each tag as individual message (server expects flat format)
-      int transmitted = 0;
-      while (queueCount > 0 && transmitted < MAX_QUEUE_SIZE) {
-        // Create JSON document for single tag
-        //// jwc 26-0125-0510 UPDATED: Round all decimals to 1 place (reduce network traffic)
-        //// jwc 26-0128-1320 ARCHIVED: StaticJsonDocument causes memory leak (doc.clear() doesn't free internal strings)
-        //// StaticJsonDocument<512> doc;
-        //// jwc 26-0128-1320 NEW: DynamicJsonDocument auto-frees all internal allocations on destructor
-        DynamicJsonDocument doc(512);
-        doc["event"] = "apriltag_data";
-        doc["tag_id"] = tagQueue[queueHead].id;
-        doc["decision_margin"] = round(tagQueue[queueHead].decision_margin * 10.0) / 10.0;
-        doc["yaw"] = round(tagQueue[queueHead].yaw * 10.0) / 10.0;
-        doc["pitch"] = round(tagQueue[queueHead].pitch * 10.0) / 10.0;
-        doc["roll"] = round(tagQueue[queueHead].roll * 10.0) / 10.0;
-        doc["x_cm"] = round(tagQueue[queueHead].x * 10.0) / 10.0;
-        doc["y_cm"] = round(tagQueue[queueHead].y * 10.0) / 10.0;
-        doc["z_cm"] = round(tagQueue[queueHead].z * 10.0) / 10.0;
-        doc["range_cm"] = round(tagQueue[queueHead].range * 10.0) / 10.0;
-        doc["timestamp"] = tagQueue[queueHead].timestamp;
-        doc["camera_name"] = "Waveshare-ESP32-S3";
-        
-        //// jwc 26-0128-0140 CRITICAL FIX #5: Eliminate WiFi.localIP().toString() String leak
-        //// Original code: doc["smartcam_ip"] = WiFi.localIP().toString();
-        //// Problem: toString() creates String object (~180 bytes) that's not freed
-        //// Solution: Use stack-allocated buffer with snprintf (no heap allocation)
-        char ipBuffer[16];  // Stack-allocated, auto-freed (xxx.xxx.xxx.xxx = 15 chars max)
-        IPAddress ip = WiFi.localIP();
-        snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-        doc["smartcam_ip"] = ipBuffer;
-        
-        //// jwc 26-0128-0120 CRITICAL FIX #4: Replace String with stack buffer to prevent DRAM leak
-        //// Original code used String object which allocates heap memory (~100 bytes per TX)
-        //// String was not being freed, causing 100-byte leak per transmission
-        //// After 30 transmissions: 3KB leaked → system crash!
-        //// NEW: Use stack-allocated buffer (auto-freed when function returns)
-        char jsonBuffer[512];  // Stack-allocated, matches StaticJsonDocument size
-        size_t len = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
-        //// jwc 26-0128-0500 ARCHIVED: Links2004 sendTXT method
-        //// webSocket.sendTXT(jsonBuffer, len);
-        //// jwc 26-0128-0500 NEW: ArduinoWebsockets send method
-        webSocket.send(jsonBuffer);
-        
-        //// jwc 26-0128-1320 ARCHIVED: doc.clear() not needed - DynamicJsonDocument destructor handles cleanup
-        //// jwc 26-0127-2150 CRITICAL FIX #2: Clear JSON document to prevent DRAM leak
-        //// doc.clear();
-        
-        //// jwc 26-0128-1350 NEW: Force garbage collection after WebSocket send
-        //// Triggers ESP32 heap cleanup to prevent memory fragmentation
-        ESP.getFreeHeap();  // Triggers GC
-        delay(1);  // Allow cleanup to complete
-        
-        //// jwc 26-0124-1340 NEW: Debug print with arrow convention
-        Serial.printf("*** Esp32 -->> SvHub: TX: %s\n", jsonBuffer);
-        
-        queueHead = (queueHead + 1) % MAX_QUEUE_SIZE;
-        queueCount--;
-        transmitted++;
-      }
-      
-      //// jwc 26-0127-0735 NEW: Increment total transmission counter
-      total_transmitted_ws += transmitted;
-      
-      Serial.printf("*** Esp32 -->> SvHub: Sent %d tags to server\n", transmitted);
-      lastTransmitTime = currentTime;
-      
-      //// jwc 26-0128-1440 NEW: Clear queue after transmission to prevent memory accumulation
-      //// Queue array may hold old data that fragments heap even after "dequeue"
-      //// Explicitly zero out the entire queue to ensure clean state
-      queueHead = 0;
-      queueTail = 0;
-      queueCount = 0;
-      memset(tagQueue, 0, sizeof(tagQueue));  // Zero out entire array
-      Serial.println("*** Queue cleared after transmission");
-    }
-    xSemaphoreGive(queueMutex);
+  // Create JSON document for single tag (STACK-ALLOCATED - no heap leak!)
+  //// jwc 26-0201-0735 UPDATED: Use StaticJsonDocument (stack) instead of DynamicJsonDocument (heap)
+  StaticJsonDocument<512> doc;
+  doc["event"] = "apriltag_data";
+  doc["tag_id"] = id;
+  doc["decision_margin"] = round(decision_margin * 10.0) / 10.0;
+  doc["yaw"] = round(yaw * 10.0) / 10.0;
+  doc["pitch"] = round(pitch * 10.0) / 10.0;
+  doc["roll"] = round(roll * 10.0) / 10.0;
+  doc["x_cm"] = round(x * 10.0) / 10.0;
+  doc["y_cm"] = round(y * 10.0) / 10.0;
+  doc["z_cm"] = round(z * 10.0) / 10.0;
+  doc["range_cm"] = round(range * 10.0) / 10.0;
+  doc["timestamp"] = millis();
+  doc["camera_name"] = "Waveshare-ESP32-S3";
+  
+  // Add IP address (stack-allocated buffer)
+  char ipBuffer[16];
+  IPAddress ip = WiFi.localIP();
+  snprintf(ipBuffer, sizeof(ipBuffer), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  doc["smartcam_ip"] = ipBuffer;
+  
+  // Serialize JSON to stack buffer
+  char jsonBuffer[512];
+  serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+  
+  //// WebSocket transmission (persistent connection, guaranteed delivery)
+  bool result = webSocket.send(jsonBuffer);
+  
+  //// Color-coded status reporting
+  if (result) {
+    //// jwc 26-0202-0625 UPDATED: Gray checkmark (✓) for TX - data sent, waiting for ACK
+    //// GRAY for WebSocket TX (data sent to network, but not yet confirmed by server)
+    Serial.printf("\033[90m*** ✓ Esp32 -->> SvHub: WebSocket TX SUCCESS: %s\033[0m\n", jsonBuffer);
+    total_transmitted_ws++;  // Increment counter on success
+  } else {
+    //// RED for failure
+    Serial.printf("\033[31m*** ❌ Esp32 -->> SvHub: WebSocket TX FAILED: %s\033[0m\n", jsonBuffer);
   }
+  
+  //// Force garbage collection after WebSocket send
+  ESP.getFreeHeap();  // Triggers GC
+  delay(1);  // Allow cleanup to complete
+  
+  //// jwc 26-0201-1400 NEW: Memory monitoring AFTER transmission (shows protocol's memory impact!)
+  //// Moved from BEFORE transmission to capture actual memory consumed by WebSocket.send()
+  //// This reveals memory leaks from buffer allocation, socket state, or cleanup failures
+  //// Expected: ~195 bytes/TX leak for WebSocket (known issue with persistent connections)
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t freePsram = ESP.getFreePsram();
+  Serial.printf("\n");
+  Serial.printf("\033[35m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total WS TX: %d\033[0m\n", 
+                freeHeap, freePsram, total_transmitted_ws);
+  Serial.printf("\n");
 }
+
+//// jwc 26-0201-0735 ARCHIVED: Old queue-based transmission (replaced by immediate transmission)
+//// void transmitAprilTagsWebSocket() { ... }
 #endif
 
 
@@ -1039,13 +1011,13 @@ WiFiUDP udp;  // UDP client object
 //// Called directly when lock achieved - bypasses queue entirely
 void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, float pitch, float roll, 
                                     float x, float y, float z, float range) {
-  //// Color-coded memory monitoring
-  uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t freePsram = ESP.getFreePsram();
-  Serial.printf("\n");
-  Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", 
-                freeHeap, freePsram, total_transmitted_udp);
-  Serial.printf("\n");
+  //// jwc 26-0201-1400 ARCHIVED: Memory monitoring BEFORE transmission (can't see protocol impact!)
+  //// uint32_t freeHeap = ESP.getFreeHeap();
+  //// uint32_t freePsram = ESP.getFreePsram();
+  //// Serial.printf("\n");
+  //// Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", 
+  ////               freeHeap, freePsram, total_transmitted_udp);
+  //// Serial.printf("\n");
   
   // Check if WiFi is connected
   if (WiFi.status() != WL_CONNECTED) {
@@ -1085,7 +1057,7 @@ void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, flo
   //// Color-coded status reporting
   if (result == 1) {
     //// GREEN for success (packet sent)
-    Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: UDP TX SUCCESS: %s\033[0m\n", jsonBuffer);
+    Serial.printf("\033[32m*** ✅ Esp32 <<-> SvHub: UDP TX SUCCESS: %s\033[0m\n", jsonBuffer);
     
     //// jwc 26-0131-0210 NEW: Wait for UDP ACK from server (with timeout)
     unsigned long ack_start = millis();
@@ -1130,6 +1102,17 @@ void transmitAprilTagUDP_Immediate(int id, float decision_margin, float yaw, flo
     //// RED for failure
     Serial.printf("\033[31m*** ❌ Esp32 -->> SvHub: UDP TX FAILED: %s\033[0m\n", jsonBuffer);
   }
+  
+  //// jwc 26-0201-1400 NEW: Memory monitoring AFTER transmission (shows protocol's memory impact!)
+  //// Moved from BEFORE transmission to capture actual memory consumed by UDP send/ACK
+  //// This reveals memory leaks from buffer allocation, socket state, or cleanup failures
+  //// Expected: ~0 bytes/TX leak for UDP (stateless, no persistent buffers)
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t freePsram = ESP.getFreePsram();
+  Serial.printf("\n");
+  Serial.printf("\033[34m*** *** *** [MEM] Free_Dram_Heap: %d b | Free_Psram: %d b | Total UDP TX: %d\033[0m\n", 
+                freeHeap, freePsram, total_transmitted_udp);
+  Serial.printf("\n");
 }
 
 //// jwc 26-0131-1350 ARCHIVED: Old queue-based transmission (replaced by immediate transmission)
@@ -1288,7 +1271,7 @@ void transmitAprilTagsHTTP() {
           int status_code = esp_http_client_get_status_code(client);
           if (status_code == 200) {
             //// GREEN for success
-            Serial.printf("\033[32m*** ✅ Esp32 <<-- SvHub: HTTP POST SUCCESS: %s (code: 200)\033[0m\n", jsonBuffer);
+            Serial.printf("\033[32m*** ✅ Esp32 <<-> SvHub: HTTP POST SUCCESS: %s (code: 200)\033[0m\n", jsonBuffer);
           } else {
             //// YELLOW for HTTP errors (4xx, 5xx)
             Serial.printf("\033[33m*** ⚠️ Esp32 <<-- SvHub: HTTP POST ERROR: %s (code: %d)\033[0m\n", jsonBuffer, status_code);
@@ -1886,28 +1869,28 @@ if(zarray_size(detections) > 0){
   unsigned long now = millis();
   
   if (detected_tag_id != -1) {
-    if (tagLock.locked_tag_id == -1) {
+    if (tagDetectLock.locked_tag_id == -1) {
       //// No tag locked yet - start new lock
-      tagLock.locked_tag_id = detected_tag_id;
-      tagLock.lock_start_time_msec = now;
-      tagLock.last_seen_time_msec = now;
-      tagLock.lock_achieved = false;
+      tagDetectLock.locked_tag_id = detected_tag_id;
+      tagDetectLock.lock_start_time_msec = now;
+      tagDetectLock.last_seen_time_msec = now;
+      tagDetectLock.lock_achieved = false;
       Serial.printf("*** [LOCK] Started locking tag ID %d\n", detected_tag_id);
-    } else if (tagLock.locked_tag_id == detected_tag_id) {
+    } else if (tagDetectLock.locked_tag_id == detected_tag_id) {
       //// Same tag - update timer and check if lock achieved
-      tagLock.last_seen_time_msec = now;
-      unsigned long lock_duration = now - tagLock.lock_start_time_msec;
+      tagDetectLock.last_seen_time_msec = now;
+      unsigned long lock_duration = now - tagDetectLock.lock_start_time_msec;
       
-      if (!tagLock.lock_achieved && lock_duration >= tagLock.LOCK_DURATION_MSEC) {
+      if (!tagDetectLock.lock_achieved && lock_duration >= tagDetectLock.DETECT_THRESHOLD_FOR_TX_MSEC) {
         //// jwc 26-0131-1405 CRITICAL FIX: Set flag BEFORE reset (was resetting immediately!)
         //// BUG: Old code set lock_achieved=true, then IMMEDIATELY reset to false
         //// Result: Transmission code never saw lock_achieved=true (always false!)
         //// FIX: Keep flag true until AFTER transmission completes
-        tagLock.lock_achieved = true;
+        tagDetectLock.lock_achieved = true;
         //// jwc 26-0131-1450 ARCHIVED: 5-second lock message
         //// Serial.printf("*** [LOCK] ✅ ACHIEVED for tag ID %d (5 sec continuous) - FLAG SET\n", detected_tag_id);
         //// jwc 26-0131-1450 NEW: Immediate lock message
-        Serial.printf("*** [LOCK] ✅ ACHIEVED for tag ID %d (immediate) - FLAG SET\n", detected_tag_id);
+        Serial.printf("*** [LOCK-YES] 🔒 tag ID %d (immediate) - FLAG SET\n", detected_tag_id);
         
         //// jwc 26-0131-1405 MOVED: Reset logic moved to AFTER transmission (line ~1950)
         //// Old location: Reset immediately (WRONG - transmission never saw flag!)
@@ -1915,22 +1898,20 @@ if(zarray_size(detections) > 0){
       }
     } else {
       //// Different tag detected - reset lock and start fresh
-      Serial.printf("*** [LOCK] ⚠️ RESET (tag changed: %d → %d)\n", tagLock.locked_tag_id, detected_tag_id);
-      tagLock.locked_tag_id = detected_tag_id;
-      tagLock.lock_start_time_msec = now;
-      tagLock.last_seen_time_msec = now;
-      tagLock.lock_achieved = false;
+      Serial.printf("*** [LOCK-YES] ⚠️ tag ID changed: %d → %d\n", tagDetectLock.locked_tag_id, detected_tag_id);
+      tagDetectLock.locked_tag_id = detected_tag_id;
+      tagDetectLock.lock_start_time_msec = now;
+      tagDetectLock.last_seen_time_msec = now;
+      tagDetectLock.lock_achieved = false;
     }
   }
 } else {
-  //// jwc 26-0131-1215 NEW: No tags detected - check for lock timeout
-  unsigned long now = millis();
-  if (tagLock.locked_tag_id != -1 && (now - tagLock.last_seen_time_msec >= tagLock.LOCK_POSTRESET_TIMEOUT_MSEC)) {
-    //// Tag lost for 2+ seconds - reset lock
-    Serial.printf("*** [LOCK] ❌ TIMEOUT (tag ID %d lost for 2+ sec)\n", tagLock.locked_tag_id);
-    tagLock.locked_tag_id = -1;
-    tagLock.lock_achieved = false;
-  }
+  //// jwc 26-0202-1850 CRITICAL FIX: Never reset lock here - only reset AFTER transmission!
+  //// jwc 26-0202-1850 ARCHIVED: Old premature reset code (caused bug - lock reset before transmission)
+  //// jwc 26-0202-1850 Old behavior: Reset lock when no tags detected (prevented transmission)
+  //// jwc 26-0202-1850 New behavior: Lock persists until transmission completes (reset at line ~1950)
+  //// jwc 26-0202-1850 This allows lock to survive between 1Hz detection cycles (1 second gaps)
+  //// jwc 26-0202-1850 No code here - lock reset moved to AFTER transmitAprilTagWebSocket_Immediate()
 }
 
 if(zarray_size(detections) > 0 && closest_idx >= 0){
@@ -1983,15 +1964,15 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
       //// jwc 26-0131-1245 NEW: Add countdown timer (same font size as tag ID)
       //// jwc 26-0131-1450 ARCHIVED: Countdown timer (not needed for immediate lock)
       //// jwc 26-0131-1510 UPDATED: Renamed lock_start_time → lock_start_time_msec
-      if (tagLock.locked_tag_id == det->id && !tagLock.lock_achieved) {
+      if (tagDetectLock.locked_tag_id == det->id && !tagDetectLock.lock_achieved) {
         //// Show countdown timer while locking (0.0s → 5.0s)
         unsigned long now = millis();
-        float elapsed = (now - tagLock.lock_start_time_msec) / 1000.0;
+        float elapsed = (now - tagDetectLock.lock_start_time_msec) / 1000.0;
         gfx->setTextSize(2);  // Same font size as HUD (was 3, now 2)
         gfx->setTextColor(YELLOW);
         gfx->setCursor(x_pos, 45);  // Below tag ID
         gfx->printf("(%.1fs)", elapsed);
-      } else if (tagLock.locked_tag_id == det->id && tagLock.lock_achieved) {
+      } else if (tagDetectLock.locked_tag_id == det->id && tagDetectLock.lock_achieved) {
         //// Show "LOCK" indicator when locked (brief moment before reset)
         gfx->setTextSize(2);  // Same font size as HUD (was 3, now 2)
         gfx->setTextColor(GREEN);
@@ -2092,28 +2073,38 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
       //// Old: Lock → enqueue → main loop → check queue → transmit (BROKEN!)
       //// New: Lock → transmit immediately (WORKS!)
       #if DEFINE_NETWORK_UDP_BOOL
-      if (tagLock.lock_achieved) {
+      if (tagDetectLock.lock_achieved) {
         //// Lock achieved - transmit immediately (no queue!)
         transmitAprilTagUDP_Immediate(det->id, det->decision_margin, yaw, pitch, roll, 
                                        x_cm, y_cm, z_cm, range_cm);
-        Serial.printf("*** [LOCK] 📤 TRANSMITTED tag ID %d immediately (no queue)\n", det->id);
+        Serial.printf("*** [LOCK] 📤 TRANSMITTED tag ID %d immediately via UDP (no queue)\n", det->id);
         
-        //// jwc 26-0131-1405 NEW: Reset lock AFTER transmission completes
-        //// jwc 26-0131-1450 UPDATED: Changed from 5-second to immediate relock
-        //// Must relock (immediate) to transmit again
-        tagLock.locked_tag_id = -1;
-        tagLock.lock_achieved = false;
-        //// jwc 26-0131-1450 ARCHIVED: 5-second relock message
-        //// Serial.printf("*** [LOCK] 🔄 RESET - must relock 5 sec for next transmission\n");
-        //// jwc 26-0131-1450 NEW: Immediate relock message
-        Serial.printf("*** [LOCK] 🔄 RESET - must relock (immediate) for next transmission\n");
+        //// jwc 26-0202-1850 UPDATED: Reset lock AFTER transmission completes (user request)
+        //// jwc 26-0202-1850 This is the ONLY place lock gets reset - ensures transmission always happens
+        tagDetectLock.locked_tag_id = -1;
+        tagDetectLock.lock_achieved = false;
+        Serial.printf("*** [LOCK-NOT] 🔄 RESET - must relock (immediate) for next transmission\n");
       }
-      #elif DEFINE_NETWORK_HTTP_BOOL || DEFINE_NETWORK_WEBSOCKET_BOOL
-      if (tagLock.lock_achieved) {
-        //// Lock achieved - enqueue for transmission (HTTP/WebSocket still use queue)
+      #elif DEFINE_NETWORK_WEBSOCKET_BOOL
+      if (tagDetectLock.lock_achieved) {
+        //// jwc 26-0201-0735 NEW: WebSocket now transmits immediately (like UDP!)
+        //// Lock achieved - transmit immediately (no queue!)
+        transmitAprilTagWebSocket_Immediate(det->id, det->decision_margin, yaw, pitch, roll, 
+                                             x_cm, y_cm, z_cm, range_cm);
+        Serial.printf("*** [LOCK-YES] 📤 TRANSMITTED tag ID %d immediately via WebSocket (no queue)\n", det->id);
+        
+        //// jwc 26-0202-1850 UPDATED: Reset lock AFTER transmission completes (user request)
+        //// jwc 26-0202-1850 This is the ONLY place lock gets reset - ensures transmission always happens
+        tagDetectLock.locked_tag_id = -1;
+        tagDetectLock.lock_achieved = false;
+        Serial.printf("*** [LOCK-NOT] 🔄 RESET - must relock (immediate) for next transmission\n");
+      }
+      #elif DEFINE_NETWORK_HTTP_BOOL
+      if (tagDetectLock.lock_achieved) {
+        //// HTTP still uses queue (stateless, needs batching for efficiency)
         enqueueAprilTag(det->id, det->decision_margin, yaw, pitch, roll, 
                         x_cm, y_cm, z_cm, range_cm);
-        Serial.printf("*** [LOCK] 📤 ENQUEUED tag ID %d for transmission\n", det->id);
+        Serial.printf("*** [LOCK] 📤 ENQUEUED tag ID %d for HTTP transmission\n", det->id);
       }
       #endif
   }
@@ -2158,12 +2149,12 @@ if(zarray_size(detections) > 0 && closest_idx >= 0){
     //// jwc 26-0128-1440 NEW: Protocol-specific transmission (HTTP, WebSocket, or UDP)
     //// jwc 26-0131-1350 UPDATED: UDP now uses immediate transmission (no queue check needed!)
     #if DEFINE_NETWORK_HTTP_BOOL
-    //// HTTP: Stateless POST requests (no persistent connection)
+    //// HTTP: Stateless POST requests (queue-based for efficiency)
     transmitAprilTagsHTTP();
     #elif DEFINE_NETWORK_WEBSOCKET_BOOL
-    //// WebSocket: Persistent connection (MEMORY LEAK!)
-    transmitAprilTagsWebSocket();
-    webSocket.poll();  // Process WebSocket events
+    //// jwc 26-0201-0735 NEW: WebSocket now uses immediate transmission (no queue check!)
+    //// WebSocket: Persistent connection, immediate transmission (already sent!)
+    webSocket.poll();  // Process WebSocket events (ping/pong, reconnect)
     #elif DEFINE_NETWORK_UDP_BOOL
     //// UDP: Immediate transmission (no queue check needed - already sent!)
     //// transmitAprilTagsUDP();  // ARCHIVED: Queue-based approach (replaced by immediate)

@@ -231,7 +231,8 @@ async def handle_esp32_message(ws, message):
             
             stats['apriltag_events'] += 1
             
-            print(f"*** SvHub <<-- Esp32: apriltag_data | 📡 ID={payload.get('tag_id')}, Pos=({payload.get('x_cm', 0):.1f},{payload.get('y_cm', 0):.1f},{payload.get('z_cm', 0):.1f})cm | GDevelop_clients={stats['gdevelop_clients']}")
+            #### jwc 26-0202-0040 n print(f"*** SvHub <<-- Esp32: apriltag_data | 📡 ID={payload.get('tag_id')}, Pos=({payload.get('x_cm', 0):.1f},{payload.get('y_cm', 0):.1f},{payload.get('z_cm', 0):.1f})cm | GDevelop_clients={stats['gdevelop_clients']}")
+            print(f"*** Esp32 -->> SvHub .... .....: 📡 ID={payload.get('tag_id')}, Pos=({payload.get('x_cm', 0):.1f},{payload.get('y_cm', 0):.1f},{payload.get('z_cm', 0):.1f})cm | GDevelop_clients={stats['gdevelop_clients']}")
             
             # Acknowledge to ESP32
             ack_msg = {'event': 'apriltag_ack', 'status': 'received'}
@@ -298,7 +299,20 @@ async def websocket_handler(websocket, path):
     - No more blocking forever on incomplete messages!
     - Proper error recovery
     - Clean connection cleanup
+    
+    jwc 26-0202-0425 NEW: Added ping/pong to prevent Windows socket timeout
+    - Sends ping every 20 seconds to keep connection alive
+    - Prevents "WinError 121: semaphore timeout" when ESP32 is silent
+    - No ESP32 code changes needed (ArduinoWebsockets auto-responds to pings)
     """
+    #### jwc 26-0202-0425 NEW: Configure ping/pong to prevent Windows socket timeout
+    # When ESP32 doesn't send AprilTag data for 30+ seconds (no tag detected),
+    # Windows socket times out with "WinError 121: semaphore timeout expired"
+    # Solution: Send automatic ping frames every 20 seconds to keep connection alive
+    # ArduinoWebsockets library automatically responds to pings (no ESP32 changes needed!)
+    websocket.ping_interval = 20  # Send ping every 20 seconds
+    websocket.ping_timeout = 10   # Wait 10 seconds for pong response
+    
     stats['total_connections'] += 1
     stats['active_connections'] += 1
     
